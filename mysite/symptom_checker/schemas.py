@@ -2,6 +2,20 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from typing import Any
+import re
+
+
+def _safe_int(value: object, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        match = re.search(r"\d+", str(value or ""))
+        if match:
+            try:
+                return int(match.group(0))
+            except Exception:
+                return default
+        return default
 
 
 @dataclass
@@ -37,7 +51,7 @@ class QuestionItem:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "QuestionItem":
         return cls(
-            id=int(data.get("id", 0)),
+            id=_safe_int(data.get("id", 0)),
             text=data.get("text", ""),
             type=data.get("type", "yesno"),
             options=list(data.get("options", [])),
@@ -56,7 +70,7 @@ class AnswerItem:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AnswerItem":
         return cls(
-            question_id=int(data.get("question_id", 0)),
+            question_id=_safe_int(data.get("question_id", 0)),
             question_text=data.get("question_text", ""),
             answer=data.get("answer", ""),
         )
@@ -101,5 +115,5 @@ class DiagnosisResult:
         return cls(
             conditions=[DiagnosisCondition.from_dict(row) for row in rows],
             urgency=data.get("urgency", "Moderate"),
-            advice=data.get("advice", "Consult a qualified doctor for evaluation."),
+            advice=data.get("advice", "Consult a qualified clinic or hospital for evaluation."),
         )

@@ -1,55 +1,14 @@
 from __future__ import annotations
 
-import re
-from urllib.parse import quote_plus
-
 from symptom_checker.ai_client import AIGenerationError, generate_diagnosis, generate_questions
 from symptom_checker.diagnosis import build_result_payload
-from symptom_checker.models import Doctor
 from symptom_checker.question_flow import append_answer, current_question, next_index
 from symptom_checker.schemas import AnswerItem, DiagnosisResult, IntakeData, QuestionItem
-from symptom_checker.services.doctor_discovery import discover_nearby_doctors
-from symptom_checker.services.recommendations import (
-    issue_collectible_tag,
-    recommended_articles,
-)
+from symptom_checker.services.care_discovery import discover_nearby_care_centers, geocode_location
+from symptom_checker.services.recommendations import issue_collectible_tag, recommended_articles
 
 
 SESSION_KEY = "symptom_checker_flow"
-
-SPECIALIZATION_KEYWORDS = {
-    "dermatologist": {"skin", "fungal", "eczema", "psoriasis", "rash", "acne", "dermatitis"},
-    "infectious disease specialist": {
-        "infection",
-        "infectious",
-        "viral",
-        "bacterial",
-        "hiv",
-        "aids",
-        "fever",
-        "tuberculosis",
-        "tb",
-    },
-    "ent specialist": {"ear", "nose", "throat", "sinus", "tonsil", "hearing", "vertigo"},
-    "pulmonologist": {"lung", "respiratory", "asthma", "cough", "breath", "pneumonia", "copd"},
-    "cardiologist": {"heart", "cardiac", "chest pain", "hypertension", "bp", "arrhythmia"},
-    "neurologist": {"neuro", "brain", "seizure", "migraine", "stroke", "nerve"},
-    "gastroenterologist": {
-        "stomach",
-        "gastric",
-        "liver",
-        "abdomen",
-        "gut",
-        "hepatitis",
-        "diarrhea",
-    },
-    "gynecologist": {"pregnancy", "uterus", "ovary", "menstrual", "pcos", "vaginal"},
-    "orthopedic specialist": {"bone", "joint", "fracture", "sprain", "arthritis", "muscle", "spine"},
-    "urologist": {"urine", "kidney", "bladder", "prostate", "urology"},
-    "psychiatrist": {"anxiety", "depression", "mental", "panic", "mood", "psychiatric"},
-    "endocrinologist": {"thyroid", "diabetes", "hormone", "endocrine"},
-    "general physician": set(),
-}
 
 
 def _initial_state() -> dict:
@@ -60,6 +19,7 @@ def _initial_state() -> dict:
         "current_index": 0,
         "diagnosis": None,
         "diagnosis_error": "",
+        "question_error": "",
         "ai_calls": {"questions": 0, "diagnosis": 0},
     }
 
@@ -73,17 +33,61 @@ def _save_flow(request, flow: dict) -> None:
     request.session.modified = True
 
 
+def _fallback_questions(intake: IntakeData) -> list[QuestionItem]:
+    symptom = (intake.symptom or "your symptom").strip()
+    return [
+        QuestionItem(
+            id=1,
+            text=f"When did {symptom} begin?",
+            type="single_choice",
+            options=["Today", "1-3 days ago", "1-4 weeks ago", "More than 1 month ago"],
+        ),
+        QuestionItem(id=2, text=f"Is {symptom} getting worse?", type="yesno", options=[]),
+        QuestionItem(
+            id=3,
+            text="How severe is it right now?",
+            type="single_choice",
+            options=["Mild", "Moderate", "Severe", "Very severe"],
+        ),
+        QuestionItem(id=4, text="Do you have fever with this issue?", type="yesno", options=[]),
+        QuestionItem(id=5, text="Do you have pain along with this issue?", type="yesno", options=[]),
+        QuestionItem(id=6, text="Any breathing difficulty right now?", type="yesno", options=[]),
+        QuestionItem(id=7, text="Any dizziness, fainting, or confusion?", type="yesno", options=[]),
+        QuestionItem(id=8, text="Any active bleeding right now?", type="yesno", options=[]),
+        QuestionItem(id=9, text="Any recent injury or accident related to this issue?", type="yesno", options=[]),
+        QuestionItem(
+            id=10,
+            text="Any long-term condition (diabetes, BP, asthma, heart disease)?",
+            type="yesno",
+            options=[],
+        ),
+        QuestionItem(id=11, text="Are you currently taking any regular medications?", type="yesno", options=[]),
+        QuestionItem(id=12, text="Any known drug or food allergies?", type="yesno", options=[]),
+        QuestionItem(id=13, text="Has this happened before?", type="yesno", options=[]),
+        QuestionItem(id=14, text="Did symptoms start after food, travel, or outside exposure?", type="yesno", options=[]),
+        QuestionItem(id=15, text="Are symptoms affecting normal daily activities?", type="yesno", options=[]),
+    ]
+
+
 def start_session(request, intake: IntakeData) -> None:
-    ai_questions = generate_questions(intake)
-    questions = [question.to_dict() for question in ai_questions]
+    question_error = ""
+    try:
+        questions = generate_questions(intake)
+        question_calls = 1
+    except AIGenerationError as exc:
+        questions = _fallback_questions(intake)
+        question_calls = 0
+        question_error = str(exc)
+
     flow = _initial_state()
     flow["intake"] = intake.to_dict()
-    flow["questions"] = questions
+    flow["questions"] = [question.to_dict() for question in questions]
     flow["answers"] = []
     flow["current_index"] = 0
     flow["diagnosis"] = None
     flow["diagnosis_error"] = ""
-    flow["ai_calls"] = {"questions": 1, "diagnosis": 0}
+    flow["question_error"] = question_error
+    flow["ai_calls"] = {"questions": question_calls, "diagnosis": 0}
     _save_flow(request, flow)
 
 
@@ -105,6 +109,8 @@ def question_context(request) -> dict:
         "step": idx + 1,
         "total": total,
         "progress": int(((idx + 1) / total) * 100) if total else 0,
+        "questions_source": "ai" if int(flow.get("ai_calls", {}).get("questions", 0)) > 0 else "fallback",
+        "question_error": flow.get("question_error", ""),
     }
 
 
@@ -128,95 +134,9 @@ def _top_conditions_from_diagnosis(condition_names: list[str]) -> list[str]:
     return [name.strip() for name in condition_names if name and name.strip()][:3]
 
 
-def _tokenize(text: str) -> set[str]:
-    return {t for t in re.split(r"[^a-zA-Z0-9]+", (text or "").lower()) if t}
-
-
-def _recommended_specializations(condition_rows: list[dict]) -> list[str]:
-    recommended: list[str] = []
-    seen: set[str] = set()
-
-    # 1) Use model-provided specialization first (can be comma-separated).
-    for row in condition_rows:
-        if not isinstance(row, dict):
-            continue
-        raw = (row.get("specialization") or "").strip()
-        if not raw:
-            continue
-        for part in [p.strip() for p in raw.split(",") if p.strip()]:
-            key = part.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            recommended.append(part)
-
-    # 2) Infer category specialists from condition names/reasoning.
-    combined_text = " ".join(
-        f"{row.get('name', '')} {row.get('reasoning', '')}"
-        for row in condition_rows
-        if isinstance(row, dict)
-    )
-    tokens = _tokenize(combined_text)
-    for specialist, keywords in SPECIALIZATION_KEYWORDS.items():
-        if keywords and tokens.intersection(keywords):
-            if specialist not in seen:
-                seen.add(specialist)
-                recommended.append(specialist.title())
-
-    if not recommended:
-        recommended.append("General Physician")
-    return recommended[:4]
-
-
-def _doctors_for_specializations(specializations: list[str]) -> list[dict]:
-    normalized_specs = [s.strip().lower() for s in specializations if s and s.strip()]
-    if not normalized_specs:
-        return []
-
-    doctors = Doctor.objects.all()
-    result = []
-    for doctor in doctors:
-        doc_spec = (doctor.specialization or "").lower()
-        if any(spec in doc_spec for spec in normalized_specs):
-            city = doctor.city or ""
-            query = quote_plus(f"{doctor.name} {doctor.specialization} {city}".strip())
-            map_search_url = f"https://www.google.com/maps/search/?api=1&query={query}"
-            result.append(
-                {
-                    "name": doctor.name,
-                    "specialization": doctor.specialization,
-                    "city": city,
-                    "phone": doctor.phone,
-                    "email": doctor.email,
-                    "latitude": doctor.latitude,
-                    "longitude": doctor.longitude,
-                    "map_search_url": map_search_url,
-                    "source": "HealthSync DB",
-                }
-            )
-    return result[:6]
-
-
-def _external_doctor_matches(specializations: list[str], intake: IntakeData) -> list[dict]:
-    scoped_specializations = [s for s in specializations if s and s.strip()] or ["General Physician"]
-    location = intake.state or "India"
-    found: list[dict] = []
-    seen_names: set[str] = set()
-    for specialization in scoped_specializations[:3]:
-        rows = discover_nearby_doctors(
-            location=location,
-            specialization=specialization,
-            limit=4,
-        )
-        for row in rows:
-            name_key = (row.get("name") or "").strip().lower()
-            if not name_key or name_key in seen_names:
-                continue
-            seen_names.add(name_key)
-            found.append(row)
-            if len(found) >= 6:
-                return found
-    return found
+def _nearby_centers_for_location(intake: IntakeData) -> list[dict]:
+    location = (intake.state or "India").strip() or "India"
+    return discover_nearby_care_centers(location=location, specialty="", limit=30, radius_m=5000)
 
 
 def get_or_build_result(request) -> dict:
@@ -247,35 +167,34 @@ def get_or_build_result(request) -> dict:
             flow["diagnosis_error"] = diagnosis_error
         _save_flow(request, flow)
 
-    built = build_result_payload(
-        diagnosis=DiagnosisResult.from_dict(diagnosis_payload)
-    )
+    built = build_result_payload(diagnosis=DiagnosisResult.from_dict(diagnosis_payload))
 
     condition_rows = diagnosis_payload.get("conditions", []) or []
-    target_specializations = _recommended_specializations(condition_rows)
     top_condition_names = _top_conditions_from_diagnosis(
         [row.get("name", "") for row in condition_rows if isinstance(row, dict)]
     )
     intake = IntakeData.from_dict(flow.get("intake", {}))
-    db_docs = _doctors_for_specializations(target_specializations)
-    external_docs = _external_doctor_matches(target_specializations, intake)
-    recommended_docs = db_docs[:]
-    known_names = {(d.get("name") or "").strip().lower() for d in recommended_docs}
-    for doc in external_docs:
-        key = (doc.get("name") or "").strip().lower()
-        if key and key not in known_names:
-            known_names.add(key)
-            recommended_docs.append(doc)
-        if len(recommended_docs) >= 6:
-            break
-    recommended_reads = recommended_articles(top_condition_names)
-    collectible = issue_collectible_tag()
 
-    built["recommended_doctors"] = recommended_docs
-    built["recommended_specializations"] = target_specializations
-    built["recommended_articles"] = recommended_reads
+    centers = _nearby_centers_for_location(intake)
+    center_point = geocode_location((intake.state or "").strip())
+
+    built["recommended_centers"] = centers
+    built["recommended_specializations"] = []
+    built["search_center"] = (
+        {
+            "latitude": center_point[0],
+            "longitude": center_point[1],
+            "label": (intake.state or "India").strip() or "India",
+            "radius_km": 5,
+        }
+        if center_point
+        else {}
+    )
+    built["recommended_articles"] = recommended_articles(top_condition_names)
     built["ai_calls"] = flow.get("ai_calls", {"questions": 1, "diagnosis": 1})
     built["ai_error"] = diagnosis_error
+
+    collectible = issue_collectible_tag()
     if collectible and getattr(collectible, "tag_code", ""):
         built["community_collectible"] = {
             "tag_code": collectible.tag_code,

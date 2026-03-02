@@ -136,10 +136,13 @@ if load_dotenv:
     load_dotenv(BASE_DIR.parent / ".env")
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-DOCTOR_DISCOVERY_PROVIDER = os.getenv("DOCTOR_DISCOVERY_PROVIDER", "osm")
+CARE_DISCOVERY_PROVIDER = os.getenv("CARE_DISCOVERY_PROVIDER", "osm")
 HERE_API_KEY = os.getenv("HERE_API_KEY", "")
 TOMTOM_API_KEY = os.getenv("TOMTOM_API_KEY", "")
 OSM_USER_AGENT = os.getenv("OSM_USER_AGENT", "HealthSync/1.0 (local-dev)")
 OSM_SEARCH_RADIUS_METERS = int(os.getenv("OSM_SEARCH_RADIUS_METERS", "12000"))
+ENABLE_AI_SYMPTOM_AUTOCOMPLETE = (
+    os.getenv("ENABLE_AI_SYMPTOM_AUTOCOMPLETE", "0").strip().lower() in {"1", "true", "yes", "on"}
+)
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')

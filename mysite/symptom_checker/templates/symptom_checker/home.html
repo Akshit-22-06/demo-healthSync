@@ -51,11 +51,11 @@
 {% endif %}
 
 
-{% if doctors %}
-<h2>Nearby Doctors</h2>
+{% if care_centers %}
+<h2>Nearby Clinics &amp; Hospitals</h2>
 <ul>
-    {% for doc in doctors %}
-        <li>{{ doc.name }} - {{ doc.specialization }}</li>
+    {% for center in care_centers %}
+        <li>{{ center.name }} - {{ center.specialization }}</li>
     {% endfor %}
 </ul>
 {% endif %}
