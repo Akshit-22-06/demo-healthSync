@@ -7,4 +7,5 @@ urlpatterns = [
     path("result/", views.result_page, name="result_page"),
     path("reset/", views.reset_flow, name="reset_flow"),
     path("location-suggest/", views.location_suggest, name="location_suggest"),
+    path("symptom-suggest/", views.symptom_suggest, name="symptom_suggest"),
 ]

@@ -1,0 +1,245 @@
+{% extends "base.html" %}
+
+{% block content %}
+<style>
+.chat-wrap {
+    width: min(1080px, 100%);
+    margin: 24px auto 18px;
+    padding: 0 16px;
+}
+.chat-head {
+    background:
+        radial-gradient(650px 240px at 10% -35%, #f6ecff 0%, transparent 62%),
+        radial-gradient(540px 220px at 92% -35%, #e6fffb 0%, transparent 62%),
+        linear-gradient(138deg, #edf5ff, #f8fffd);
+    border: 1px solid #dce8f7;
+    border-radius: 18px;
+    padding: 18px;
+    box-shadow: 0 16px 32px rgba(21, 42, 70, 0.08);
+}
+.chat-head h2 {
+    margin: 0;
+}
+.chat-head p {
+    margin: 8px 0 0;
+    color: #45607b;
+    line-height: 1.4;
+}
+.chip {
+    display: inline-block;
+    margin-top: 10px;
+    padding: 6px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 700;
+    background: #f0e9ff;
+    color: #5a3e9c;
+}
+.chat-box {
+    margin-top: 16px;
+    border: 1px solid #dce8f7;
+    border-radius: 14px;
+    background: white;
+    padding: 14px;
+    box-shadow: 0 12px 25px rgba(19, 44, 71, 0.06);
+}
+.quick-prompts {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 10px;
+}
+.prompt-btn {
+    border: 1px solid #d1e2f5;
+    background: #f7fbff;
+    border-radius: 999px;
+    padding: 7px 12px;
+    font-size: 12px;
+    color: #27547f;
+    cursor: pointer;
+}
+.prompt-btn:hover {
+    background: #edf6ff;
+}
+.chat-scroll {
+    max-height: 460px;
+    overflow-y: auto;
+    padding-right: 4px;
+}
+.bubble {
+    border: 1px solid #dce8f7;
+    border-radius: 12px;
+    padding: 10px 12px;
+    margin-bottom: 10px;
+    background: #f8fbff;
+}
+.bubble.mine {
+    border-color: #bfe0d4;
+    background: #f2fff9;
+}
+.bubble .meta {
+    margin-bottom: 5px;
+    font-size: 12px;
+    color: #516c87;
+}
+.msg-form {
+    margin-top: 12px;
+    display: grid;
+    gap: 10px;
+}
+.msg-input {
+    width: 100%;
+    border: 1px solid #d2e1f2;
+    border-radius: 10px;
+    min-height: 96px;
+    padding: 10px 12px;
+    resize: vertical;
+    font-size: 15px;
+    line-height: 1.4;
+}
+.msg-input:focus {
+    outline: none;
+    border-color: #0f7be9;
+    box-shadow: 0 0 0 4px rgba(15, 123, 233, 0.14);
+}
+.form-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+.char-count {
+    color: #5a7087;
+    font-size: 12px;
+    font-weight: 600;
+}
+.btn-main {
+    border: none;
+    background: linear-gradient(90deg, #0e79e8, #12aa9b);
+    color: #fff;
+    padding: 10px 14px;
+    border-radius: 10px;
+    font-weight: 700;
+    cursor: pointer;
+}
+.flash-list {
+    margin-top: 14px;
+}
+.flash {
+    border-radius: 10px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    font-weight: 600;
+}
+.flash.success {
+    background: #effcf5;
+    border: 1px solid #b9ebd0;
+    color: #125f3f;
+}
+.flash.error {
+    background: #fff4f4;
+    border: 1px solid #f0c9c9;
+    color: #932424;
+}
+.chat-links {
+    margin-top: 12px;
+}
+.chat-links a {
+    color: #1b4d78;
+    font-weight: 700;
+    text-decoration: none;
+}
+@media (max-width: 640px) {
+    .chat-wrap {
+        padding: 0 12px;
+    }
+    .chat-head,
+    .chat-box {
+        padding: 12px;
+    }
+}
+</style>
+
+<section class="chat-wrap">
+    <header class="chat-head">
+        <h2>{{ room.name }}</h2>
+        <p>{{ room.description }}</p>
+        <span class="chip">Validated Tag: {{ access_tag.tag_code }}</span>
+    </header>
+
+    {% if messages %}
+    <div class="flash-list">
+        {% for message in messages %}
+        <div class="flash {{ message.tags|default:'error' }}">{{ message }}</div>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    <div class="chat-box">
+        <div class="quick-prompts">
+            <button type="button" class="prompt-btn" data-prompt="Today I am feeling">Today I am feeling...</button>
+            <button type="button" class="prompt-btn" data-prompt="One thing helping me today is">What is helping today?</button>
+            <button type="button" class="prompt-btn" data-prompt="Can someone suggest coping tips for">Need coping tips</button>
+            <button type="button" class="prompt-btn" data-prompt="I want to share a small win">Share a small win</button>
+        </div>
+
+        <div class="chat-scroll" id="chat-scroll">
+            {% if room_messages %}
+                {% for item in room_messages %}
+                <article class="bubble {% if item.user_id == request.user.id %}mine{% endif %}">
+                    <div class="meta">{{ item.user.username }} | {{ item.created_at|date:"M d, Y H:i" }}</div>
+                    <div>{{ item.body }}</div>
+                </article>
+                {% endfor %}
+            {% else %}
+                <p>No messages yet. Start with a supportive message.</p>
+            {% endif %}
+        </div>
+
+        <form class="msg-form" method="POST" action="{% url 'community_room' room.code %}">
+            {% csrf_token %}
+            <textarea id="message-input" class="msg-input" name="message" maxlength="1500" placeholder="Type a supportive message..." required></textarea>
+            <div class="form-row">
+                <span class="char-count" id="char-count">0 / 1500</span>
+                <button type="submit" class="btn-main">Send Message</button>
+            </div>
+        </form>
+
+        <div class="chat-links">
+            <a href="{% url 'community' %}">Back to Community</a>
+        </div>
+    </div>
+</section>
+
+<script>
+(function () {
+    const input = document.getElementById("message-input");
+    const count = document.getElementById("char-count");
+    const scrollBox = document.getElementById("chat-scroll");
+    if (scrollBox) {
+        scrollBox.scrollTop = scrollBox.scrollHeight;
+    }
+
+    if (input && count) {
+        const updateCount = function () {
+            count.textContent = `${input.value.length} / 1500`;
+        };
+        input.addEventListener("input", updateCount);
+        updateCount();
+    }
+
+    document.querySelectorAll(".prompt-btn").forEach((btn) => {
+        btn.addEventListener("click", function () {
+            if (!input) return;
+            const prompt = btn.getAttribute("data-prompt") || "";
+            input.value = prompt.trim() + (prompt.endsWith(" ") ? "" : " ");
+            input.focus();
+            if (count) {
+                count.textContent = `${input.value.length} / 1500`;
+            }
+        });
+    });
+})();
+</script>
+{% endblock %}

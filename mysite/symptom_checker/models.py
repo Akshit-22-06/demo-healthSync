@@ -34,19 +34,6 @@ class Disease(models.Model):
         return self.name
 
 
-class Doctor(models.Model):
-    name = models.CharField(max_length=200)
-    specialization = models.CharField(max_length=200)
-    city = models.CharField(max_length=200)
-    phone = models.CharField(max_length=20)
-    email = models.EmailField()
-    latitude = models.FloatField(null=True, blank=True)
-    longitude = models.FloatField(null=True, blank=True)
-
-    def __str__(self):
-        return f"{self.name} - {self.city}"
-
-
 class SymptomReport(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     symptoms = models.ManyToManyField(Symptom)

@@ -110,6 +110,22 @@ body {
     color: var(--muted);
     font-size: 13px;
 }
+.plan-list, .tips-list {
+    margin: 10px 0 0;
+    padding-left: 20px;
+    color: #20384f;
+}
+.plan-list li, .tips-list li {
+    margin-bottom: 8px;
+    line-height: 1.45;
+}
+#nearby-centers-map {
+    width: 100%;
+    height: 360px;
+    border-radius: 14px;
+    border: 1px solid var(--line);
+    margin-top: 14px;
+}
 @media (max-width: 860px) {
     .grid { grid-template-columns: 1fr; }
 }
@@ -120,11 +136,10 @@ body {
     <section class="panel hero">
         <h1>Final Assessment</h1>
         <p>Diagnosis generated after completing the AI question set.</p>
-        {% if ai_error %}
-        <p style="margin-top:10px;color:#9d1e1e;font-weight:700;">AI status: unavailable ({{ ai_error }})</p>
-        {% else %}
-        <p style="margin-top:10px;color:#17613e;font-weight:700;">AI status: generated and validated.</p>
-        {% endif %}
+        <p style="margin-top:10px;color:#17613e;font-weight:700;">
+            AI status: Questions={{ ai_generation.questions_ai|yesno:"Generated,Not generated" }} |
+            Diagnosis={{ ai_generation.diagnosis_ai|yesno:"Generated,Not generated" }}
+        </p>
         <div class="badge">Urgency: {{ urgency }}</div>
         <div class="risk">{{ risk_banner }}</div>
     </section>
@@ -132,6 +147,19 @@ body {
     <section class="panel">
         <h3>Recommended Action</h3>
         <p>{{ advice }}</p>
+    </section>
+
+    <section class="panel">
+        <h3>Next 24 Hours Plan</h3>
+        {% if next_24h_plan %}
+        <ol class="plan-list">
+            {% for step in next_24h_plan %}
+            <li>{{ step }}</li>
+            {% endfor %}
+        </ol>
+        {% else %}
+        <p>Follow hydration, rest, and symptom monitoring. Escalate if red flags appear.</p>
+        {% endif %}
     </section>
 
     <section class="panel">
@@ -152,27 +180,102 @@ body {
     </section>
 
     <section class="panel">
-        <h3>Recommended Doctors</h3>
-        {% if recommended_specializations %}
-        <p class="meta">Specialist categories considered: {{ recommended_specializations|join:", " }}</p>
-        {% endif %}
-        {% if recommended_doctors %}
+        <h3>Nearby Clinics &amp; Hospitals (within 5 km)</h3>
+        {% if recommended_centers %}
         <div class="grid">
-            {% for d in recommended_doctors %}
+            {% for center in recommended_centers %}
             <article class="card">
-                <strong>{{ d.name }}</strong>
-                <p>{{ d.specialization }}</p>
-                <div class="meta">{{ d.city }} | {{ d.phone }} | {{ d.email }}</div>
-                <div class="meta">Source: {{ d.source|default:"HealthSync DB" }}</div>
+                <strong>{{ center.name }}</strong>
+                <p>{{ center.specialization|default:"General Medicine" }}</p>
+                <div class="meta">Type: {{ center.facility_type|default:"Clinic/Hospital" }}</div>
+                <div class="meta">{{ center.city }} | {{ center.phone }} | {{ center.email }}</div>
+                <div class="meta">Source: {{ center.source|default:"Map API" }}{% if center.distance_km %} | {{ center.distance_km }} km{% endif %}</div>
                 <div class="row">
-                    <a class="btn" href="{{ d.map_search_url }}" target="_blank" rel="noopener">Open Location</a>
+                    <a class="btn" href="{{ center.map_search_url }}" target="_blank" rel="noopener">Open Location</a>
                 </div>
             </article>
             {% endfor %}
         </div>
         {% else %}
-        <p>No matching doctors found for current specialization suggestions.</p>
+        <p>No clinics/hospitals found in 5 km. Try a more precise full location (area, city, district).</p>
         {% endif %}
+        {{ recommended_centers|json_script:"recommended-centers-data" }}
+        {{ search_center|json_script:"search-center-data" }}
+        <div id="nearby-centers-map"></div>
+        <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+        <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+        <script>
+        (function () {
+            const root = document.getElementById("nearby-centers-map");
+            if (!root) return;
+
+            const centers = JSON.parse(document.getElementById("recommended-centers-data").textContent || "[]");
+            const searchCenter = JSON.parse(document.getElementById("search-center-data").textContent || "{}");
+
+            const centerLat = Number(searchCenter.latitude);
+            const centerLng = Number(searchCenter.longitude);
+            const centerIsValid = Number.isFinite(centerLat) && Number.isFinite(centerLng);
+
+            const points = centers.filter((p) => {
+                const lat = Number(p.latitude);
+                const lng = Number(p.longitude);
+                return Number.isFinite(lat) && Number.isFinite(lng);
+            });
+
+            if (!centerIsValid && !points.length) return;
+
+            const startPoint = centerIsValid ? [centerLat, centerLng] : [Number(points[0].latitude), Number(points[0].longitude)];
+            const map = L.map(root).setView(startPoint, 13);
+            L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+                maxZoom: 19,
+                attribution: "&copy; OpenStreetMap contributors",
+            }).addTo(map);
+
+            const bounds = [];
+
+            if (centerIsValid) {
+                bounds.push([centerLat, centerLng]);
+                const radiusMeters = Math.max(100, Number(searchCenter.radius_km || 5) * 1000);
+                L.circle([centerLat, centerLng], {
+                    radius: radiusMeters,
+                    color: "#0d78e8",
+                    fillColor: "#bfe4ff",
+                    fillOpacity: 0.18,
+                    weight: 2,
+                }).addTo(map).bindPopup(`Search radius: ${searchCenter.radius_km || 5} km`);
+
+                L.circleMarker([centerLat, centerLng], {
+                    radius: 6,
+                    color: "#0a4f8f",
+                    fillColor: "#0d78e8",
+                    fillOpacity: 1,
+                    weight: 2,
+                }).addTo(map).bindPopup(`Location: ${searchCenter.label || "Selected area"}`);
+            }
+
+            points.forEach((p) => {
+                const lat = Number(p.latitude);
+                const lng = Number(p.longitude);
+                bounds.push([lat, lng]);
+                L.circleMarker([lat, lng], {
+                    radius: 8,
+                    color: "#1e88e5",
+                    fillColor: "#4fc3f7",
+                    fillOpacity: 0.92,
+                    weight: 2,
+                }).addTo(map).bindPopup(
+                    `<strong>${p.name || "Nearby Clinic"}</strong><br>` +
+                    `${p.facility_type || "Clinic/Hospital"}<br>` +
+                    `${p.city || ""}<br>` +
+                    `${p.distance_km || "N/A"} km`
+                );
+            });
+
+            if (bounds.length > 1) {
+                map.fitBounds(bounds, { padding: [28, 28] });
+            }
+        })();
+        </script>
     </section>
 
     <section class="panel">
@@ -194,18 +297,49 @@ body {
     </section>
 
     <section class="panel">
-        <h3>Collectible Community Tag</h3>
-        {% if collectible.tag_code %}
-        <div class="tag">{{ collectible.tag_code }}</div>
-        <p>{{ collectible.label }}</p>
+        <h3>Health Tips</h3>
+        {% if health_tips %}
+        <ul class="tips-list">
+            {% for tip in health_tips %}
+            <li>{{ tip }}</li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <p>Stay hydrated, rest, and seek care if symptoms worsen.</p>
+        {% endif %}
+    </section>
+
+    <section class="panel">
+        <h3>Community Access</h3>
+        {% if community_access.message %}
+        <p>{{ community_access.message }}</p>
+        {% endif %}
+        {% if community_access.status == "approved" %}
+        <div class="tag">{{ community_access.tag_code }}</div>
         <div class="row">
-            <a class="btn" href="{{ collectible.community_url }}">Use Tag in Community</a>
+            <a class="btn" href="{{ community_access.community_url|default:'/community/' }}">Open Chat</a>
+            <a class="btn" href="/symptoms/reset/">Start New Check</a>
+        </div>
+        {% elif community_access.status == "pending" %}
+        <div class="tag">{{ community_access.tag_code }}</div>
+        <div class="row">
+            <a class="btn" href="{{ community_access.community_url|default:'/community/' }}">Request Access</a>
+            <a class="btn" href="/symptoms/reset/">Start New Check</a>
+        </div>
+        {% elif community_access.status == "emergency" %}
+        <div class="row">
             <a class="btn" href="/symptoms/reset/">Start New Check</a>
         </div>
         {% else %}
-        <p>No collectible tag available.</p>
+        <div class="row">
+            {% if request.user.is_authenticated %}
+            <a class="btn" href="/community/">Check Access</a>
+            {% else %}
+            <a class="btn" href="/login/?next=/community/">Login to Unlock Chat</a>
+            {% endif %}
+            <a class="btn" href="/symptoms/reset/">Start New Check</a>
+        </div>
         {% endif %}
-        <p class="subtle">AI calls this session: Questions={{ ai_calls.questions|default:0 }}, Diagnosis={{ ai_calls.diagnosis|default:0 }}</p>
     </section>
 </div>
 </body>
