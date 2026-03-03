@@ -300,37 +300,40 @@ Follow-up answers:
     return diagnosis
 
 
-def generate_symptom_suggestions(query: str, *, max_items: int = 12) -> list[str]:
+def generate_symptom_suggestions(query: str, *, max_items: int = 10) -> list[str]:
     cleaned = (query or "").strip()
     if len(cleaned) < 2:
         return []
 
+    max_items = max(3, min(int(max_items or 10), 20))
     prompt = f"""
-You are a medical search-assist autocomplete engine.
-Return ONLY a JSON array of up to {max_items} concise symptom/disease terms relevant to India context.
-Terms must be short, clinically meaningful, and suitable for triage form input.
+You generate health search suggestions for an input field.
+Return ONLY a JSON array (no markdown) of up to {max_items} short terms.
+Use clinically common symptom/condition names only.
 Input text: {cleaned}
 """
 
     try:
-        response = _generate_content_with_retry(prompt, retries=0)
+        response = _generate_content_with_retry(prompt, retries=1)
         parsed = _parse_json(response)
-        if not isinstance(parsed, list):
-            return []
-        out: list[str] = []
-        seen: set[str] = set()
-        for item in parsed:
-            value = str(item or "").strip()
-            if not value:
-                continue
-            key = value.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append(value)
-            if len(out) >= max_items:
-                break
-        return out
-    except Exception:
-        return []
+    except Exception as exc:
+        raise AIGenerationError(str(exc)) from exc
+
+    if not isinstance(parsed, list):
+        raise AIGenerationError("AI symptom suggestion response is not a JSON array.")
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for row in parsed:
+        item = str(row or "").strip()
+        if not item:
+            continue
+        key = item.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+        if len(out) >= max_items:
+            break
+    return out
 

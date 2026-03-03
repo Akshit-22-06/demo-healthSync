@@ -1,17 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
 
 from django.db.models import Q
 
 from articles.models import Article
-
-
-@dataclass
-class _Collectible:
-    tag_code: str
-    display_label: str
 
 
 def recommended_articles(_conditions: list) -> list[dict]:
@@ -56,7 +49,3 @@ def recommended_articles(_conditions: list) -> list[dict]:
             if len(matched) >= 6:
                 return matched
     return matched
-
-
-def issue_collectible_tag(_session=None, _condition=None):
-    return _Collectible(tag_code="HS-AI-TRIAGE", display_label="Health Insight Pass")

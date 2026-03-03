@@ -41,21 +41,23 @@ def geocode_location(location: str) -> tuple[float, float] | None:
     return _nominatim_geocode(location)
 
 
-def suggest_locations(query: str, *, limit: int = 6) -> list[str]:
+def suggest_locations(query: str, *, limit: int = 8) -> list[str]:
     cleaned = (query or "").strip()
     if len(cleaned) < 2:
         return []
-    max_items = max(4, min(limit, 20))
-    queries = [
-        {"q": cleaned, "countrycodes": "in"},
+
+    max_items = max(3, min(int(limit or 8), 20))
+    variants = [
         {"q": f"{cleaned}, India", "countrycodes": "in"},
+        {"q": cleaned, "countrycodes": "in"},
         {"q": cleaned},
     ]
-    suggestions: list[str] = []
+
+    out: list[str] = []
     seen: set[str] = set()
-    for query_params in queries:
+    for variant in variants:
         params = {
-            **query_params,
+            **variant,
             "format": "jsonv2",
             "addressdetails": 1,
             "limit": max_items,
@@ -64,18 +66,19 @@ def suggest_locations(query: str, *, limit: int = 6) -> list[str]:
         payload = _fetch_json(url)
         if not isinstance(payload, list):
             continue
+
         for row in payload:
-            label = (row.get("display_name") or "").strip()
+            label = str(row.get("display_name") or "").strip()
             if not label:
                 continue
             key = label.lower()
             if key in seen:
                 continue
             seen.add(key)
-            suggestions.append(label)
-            if len(suggestions) >= max_items:
-                return suggestions
-    return suggestions
+            out.append(label)
+            if len(out) >= max_items:
+                return out
+    return out
 
 
 def _discover_osm(*, location: str, specialty: str, limit: int, radius_m: int) -> list[dict]:

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from community.services import evaluate_community_eligibility
 from symptom_checker.ai_client import AIGenerationError, generate_diagnosis, generate_questions
 from symptom_checker.diagnosis import build_result_payload
 from symptom_checker.question_flow import append_answer, current_question, next_index
 from symptom_checker.schemas import AnswerItem, DiagnosisResult, IntakeData, QuestionItem
 from symptom_checker.services.care_discovery import discover_nearby_care_centers, geocode_location
-from symptom_checker.services.recommendations import issue_collectible_tag, recommended_articles
+from symptom_checker.services.recommendations import recommended_articles
 
 
 SESSION_KEY = "symptom_checker_flow"
@@ -20,6 +21,7 @@ def _initial_state() -> dict:
         "diagnosis": None,
         "diagnosis_error": "",
         "question_error": "",
+        "community_access": None,
         "ai_calls": {"questions": 0, "diagnosis": 0},
     }
 
@@ -33,51 +35,8 @@ def _save_flow(request, flow: dict) -> None:
     request.session.modified = True
 
 
-def _fallback_questions(intake: IntakeData) -> list[QuestionItem]:
-    symptom = (intake.symptom or "your symptom").strip()
-    return [
-        QuestionItem(
-            id=1,
-            text=f"When did {symptom} begin?",
-            type="single_choice",
-            options=["Today", "1-3 days ago", "1-4 weeks ago", "More than 1 month ago"],
-        ),
-        QuestionItem(id=2, text=f"Is {symptom} getting worse?", type="yesno", options=[]),
-        QuestionItem(
-            id=3,
-            text="How severe is it right now?",
-            type="single_choice",
-            options=["Mild", "Moderate", "Severe", "Very severe"],
-        ),
-        QuestionItem(id=4, text="Do you have fever with this issue?", type="yesno", options=[]),
-        QuestionItem(id=5, text="Do you have pain along with this issue?", type="yesno", options=[]),
-        QuestionItem(id=6, text="Any breathing difficulty right now?", type="yesno", options=[]),
-        QuestionItem(id=7, text="Any dizziness, fainting, or confusion?", type="yesno", options=[]),
-        QuestionItem(id=8, text="Any active bleeding right now?", type="yesno", options=[]),
-        QuestionItem(id=9, text="Any recent injury or accident related to this issue?", type="yesno", options=[]),
-        QuestionItem(
-            id=10,
-            text="Any long-term condition (diabetes, BP, asthma, heart disease)?",
-            type="yesno",
-            options=[],
-        ),
-        QuestionItem(id=11, text="Are you currently taking any regular medications?", type="yesno", options=[]),
-        QuestionItem(id=12, text="Any known drug or food allergies?", type="yesno", options=[]),
-        QuestionItem(id=13, text="Has this happened before?", type="yesno", options=[]),
-        QuestionItem(id=14, text="Did symptoms start after food, travel, or outside exposure?", type="yesno", options=[]),
-        QuestionItem(id=15, text="Are symptoms affecting normal daily activities?", type="yesno", options=[]),
-    ]
-
-
 def start_session(request, intake: IntakeData) -> None:
-    question_error = ""
-    try:
-        questions = generate_questions(intake)
-        question_calls = 1
-    except AIGenerationError as exc:
-        questions = _fallback_questions(intake)
-        question_calls = 0
-        question_error = str(exc)
+    questions = generate_questions(intake)
 
     flow = _initial_state()
     flow["intake"] = intake.to_dict()
@@ -86,8 +45,9 @@ def start_session(request, intake: IntakeData) -> None:
     flow["current_index"] = 0
     flow["diagnosis"] = None
     flow["diagnosis_error"] = ""
-    flow["question_error"] = question_error
-    flow["ai_calls"] = {"questions": question_calls, "diagnosis": 0}
+    flow["question_error"] = ""
+    flow["community_access"] = None
+    flow["ai_calls"] = {"questions": 1, "diagnosis": 0}
     _save_flow(request, flow)
 
 
@@ -109,7 +69,7 @@ def question_context(request) -> dict:
         "step": idx + 1,
         "total": total,
         "progress": int(((idx + 1) / total) * 100) if total else 0,
-        "questions_source": "ai" if int(flow.get("ai_calls", {}).get("questions", 0)) > 0 else "fallback",
+        "questions_source": "ai",
         "question_error": flow.get("question_error", ""),
     }
 
@@ -143,6 +103,8 @@ def get_or_build_result(request) -> dict:
     flow = _flow(request)
     if not has_active_session(request):
         return {}
+    if int(flow.get("ai_calls", {}).get("questions", 0)) <= 0:
+        raise AIGenerationError(flow.get("question_error") or "AI question generation did not complete.")
 
     if flow.get("diagnosis"):
         diagnosis_payload = flow["diagnosis"]
@@ -157,14 +119,9 @@ def get_or_build_result(request) -> dict:
             flow["diagnosis"] = diagnosis_payload
             flow["ai_calls"]["diagnosis"] = 1
         except AIGenerationError as exc:
-            diagnosis_payload = DiagnosisResult(
-                conditions=[],
-                urgency="Moderate",
-                advice="Assessment unavailable because live AI generation failed. Please retry shortly.",
-            ).to_dict()
-            diagnosis_error = str(exc)
-            flow["diagnosis"] = diagnosis_payload
-            flow["diagnosis_error"] = diagnosis_error
+            flow["diagnosis_error"] = str(exc)
+            _save_flow(request, flow)
+            raise
         _save_flow(request, flow)
 
     built = build_result_payload(diagnosis=DiagnosisResult.from_dict(diagnosis_payload))
@@ -179,7 +136,6 @@ def get_or_build_result(request) -> dict:
     center_point = geocode_location((intake.state or "").strip())
 
     built["recommended_centers"] = centers
-    built["recommended_specializations"] = []
     built["search_center"] = (
         {
             "latitude": center_point[0],
@@ -193,16 +149,21 @@ def get_or_build_result(request) -> dict:
     built["recommended_articles"] = recommended_articles(top_condition_names)
     built["ai_calls"] = flow.get("ai_calls", {"questions": 1, "diagnosis": 1})
     built["ai_error"] = diagnosis_error
+    built["ai_generation"] = {
+        "questions_ai": int(flow.get("ai_calls", {}).get("questions", 0)) > 0,
+        "diagnosis_ai": int(flow.get("ai_calls", {}).get("diagnosis", 0)) > 0,
+    }
 
-    collectible = issue_collectible_tag()
-    if collectible and getattr(collectible, "tag_code", ""):
-        built["community_collectible"] = {
-            "tag_code": collectible.tag_code,
-            "label": collectible.display_label,
-            "community_url": f"/community/?tag={collectible.tag_code}",
-        }
-    else:
-        built["community_collectible"] = {}
+    if flow.get("community_access") is None:
+        user = getattr(request, "user", None)
+        flow["community_access"] = evaluate_community_eligibility(
+            user=user,
+            intake=intake.to_dict(),
+            diagnosis=diagnosis_payload,
+        )
+        _save_flow(request, flow)
+
+    built["community_access"] = flow.get("community_access") or {}
     return built
 
 

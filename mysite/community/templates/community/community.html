@@ -1,21 +1,256 @@
-{% extends 'base.html' %}
+{% extends "base.html" %}
 
 {% block content %}
+<style>
+.community-wrap {
+    width: min(1040px, 100%);
+    margin: 26px auto 20px;
+    padding: 0 16px;
+}
+.community-head {
+    background: linear-gradient(136deg, #edf5ff, #f8fffd);
+    border: 1px solid #dce8f7;
+    border-radius: 16px;
+    padding: 18px;
+    box-shadow: 0 14px 30px rgba(21, 42, 70, 0.08);
+}
+.community-head h2 {
+    margin: 0;
+}
+.community-head p {
+    margin: 8px 0 0;
+    color: #46617b;
+}
+.status-card {
+    margin-top: 14px;
+    padding: 14px 16px;
+    border-radius: 12px;
+    border: 1px solid #dbe9f8;
+    background: #fff;
+}
+.status-card.approved {
+    border-color: #c8e8db;
+    background: #f3fff9;
+}
+.status-card.pending {
+    border-color: #f1e1ba;
+    background: #fffaf1;
+}
+.status-card.locked {
+    border-color: #f1caca;
+    background: #fff7f7;
+}
+.btn-main {
+    display: inline-block;
+    text-decoration: none;
+    border: none;
+    background: linear-gradient(90deg, #0e79e8, #12aa9b);
+    color: #fff;
+    padding: 10px 14px;
+    border-radius: 10px;
+    font-weight: 700;
+    cursor: pointer;
+}
+.btn-alt {
+    display: inline-block;
+    text-decoration: none;
+    border: 1px solid #cfe1f6;
+    background: #f7fbff;
+    color: #20507c;
+    padding: 10px 14px;
+    border-radius: 10px;
+    font-weight: 700;
+}
+.action-row {
+    margin-top: 10px;
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+.flash-list {
+    margin-top: 12px;
+}
+.flash {
+    border-radius: 10px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    font-weight: 600;
+}
+.flash.success {
+    background: #effcf5;
+    border: 1px solid #b9ebd0;
+    color: #125f3f;
+}
+.flash.error {
+    background: #fff4f4;
+    border: 1px solid #f0c9c9;
+    color: #932424;
+}
+.chat-list {
+    margin-top: 16px;
+    border: 1px solid #dce8f7;
+    border-radius: 14px;
+    overflow: hidden;
+    background: #fff;
+}
+.chat-row {
+    display: grid;
+    grid-template-columns: 52px minmax(0, 1fr) auto;
+    gap: 12px;
+    padding: 12px 14px;
+    border-bottom: 1px solid #eef3fb;
+    text-decoration: none;
+    color: inherit;
+}
+.chat-row:last-child {
+    border-bottom: 0;
+}
+.chat-row:hover {
+    background: #f7fbff;
+}
+.chat-avatar {
+    width: 52px;
+    height: 52px;
+    border-radius: 50%;
+    background: linear-gradient(145deg, #e5f0ff, #def8ef);
+    display: grid;
+    place-items: center;
+    font-weight: 800;
+    color: #214a73;
+}
+.chat-main {
+    min-width: 0;
+}
+.chat-top {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    align-items: center;
+}
+.chat-name {
+    margin: 0;
+    font-size: 18px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.chat-time {
+    color: #64809b;
+    font-size: 12px;
+    white-space: nowrap;
+}
+.chat-preview {
+    margin: 6px 0 0;
+    color: #46617c;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.chat-meta {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    justify-content: center;
+    gap: 6px;
+    min-width: 70px;
+}
+.chat-count {
+    font-size: 12px;
+    color: #5f7590;
+}
+.chat-badge {
+    min-width: 24px;
+    height: 24px;
+    border-radius: 999px;
+    background: #14b471;
+    color: #fff;
+    font-size: 12px;
+    font-weight: 700;
+    display: grid;
+    place-items: center;
+    padding: 0 6px;
+}
+@media (max-width: 640px) {
+    .community-wrap {
+        padding: 0 12px;
+    }
+    .chat-row {
+        grid-template-columns: 44px minmax(0, 1fr) auto;
+        padding: 10px 11px;
+    }
+    .chat-avatar {
+        width: 44px;
+        height: 44px;
+    }
+    .chat-name {
+        font-size: 16px;
+    }
+}
+</style>
 
-<h2 style="margin-bottom:20px;">Community</h2>
+<section class="community-wrap">
+    <header class="community-head">
+        <h2>HealthSync Community Chat</h2>
+        <p>Groups and messages are stored in database and preserved for history.</p>
+    </header>
 
-<div class="grid">
-    <div class="card">
-        <h4>Drink 8 glasses of water daily</h4>
-        <p>Shared by Rahul</p>
+    {% if messages %}
+    <div class="flash-list">
+        {% for message in messages %}
+        <div class="flash {{ message.tags|default:'error' }}">{{ message }}</div>
+        {% endfor %}
     </div>
+    {% endif %}
 
-    <div class="card">
-        <h4>Sleep before 11 PM</h4>
-        <p>Shared by Neha</p>
-    </div>
-</div>
+    {% if can_access %}
+    {% if show_unlocked_notice %}
+    <article class="status-card approved">
+        <strong>Community Chat Unlocked</strong>
+    </article>
+    {% endif %}
 
-<a href="#" class="btn" style="margin-top:20px;">Share Tip</a>
-
+    <section class="chat-list">
+        {% for item in room_previews %}
+        <a class="chat-row" href="{% url 'community_room' item.room.code %}">
+            <div class="chat-avatar">{{ item.group_name|slice:':1'|upper }}</div>
+            <div class="chat-main">
+                <div class="chat-top">
+                    <h3 class="chat-name">{{ item.group_name }}</h3>
+                    <span class="chat-time">{% if item.latest_time %}{{ item.latest_time|date:"g:i A" }}{% else %}--{% endif %}</span>
+                </div>
+                <p class="chat-preview">{% if item.latest_sender %}{{ item.latest_sender }}: {% endif %}{{ item.latest_preview }}</p>
+            </div>
+            <div class="chat-meta">
+                <span class="chat-count">{{ item.total_messages }} messages</span>
+                <span class="chat-badge">{{ item.total_messages }}</span>
+            </div>
+        </a>
+        {% empty %}
+        <div class="chat-row" style="display:block;">
+            <p>No group available yet.</p>
+        </div>
+        {% endfor %}
+    </section>
+    {% else %}
+        {% if pending_tags %}
+        <article class="status-card pending">
+            <strong>Community Access Pending</strong>
+            <p>{{ locked_reason }}</p>
+            <form method="POST" action="{% url 'community_request_access' %}" style="margin-top:10px;">
+                {% csrf_token %}
+                <button type="submit" class="btn-main">Request Access</button>
+            </form>
+        </article>
+        {% else %}
+        <article class="status-card locked">
+            <strong>Community Access Locked</strong>
+            <p>{{ locked_reason }}</p>
+            <div class="action-row">
+                <a class="btn-main" href="{% url 'symptom_home' %}">Run Symptom Checker</a>
+                <a class="btn-alt" href="{% url 'community' %}">Refresh</a>
+            </div>
+        </article>
+        {% endif %}
+    {% endif %}
+</section>
 {% endblock %}

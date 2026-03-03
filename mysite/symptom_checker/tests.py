@@ -52,7 +52,7 @@ class SymptomCheckerFlowTests(TestCase):
         self.assertEqual(len(flow["questions"]), 2)
 
     @patch("symptom_checker.engine.generate_questions")
-    def test_start_falls_back_to_local_questions_on_ai_failure(self, mock_generate_questions):
+    def test_start_returns_to_sc_when_ai_question_generation_fails(self, mock_generate_questions):
         mock_generate_questions.side_effect = AIGenerationError("Gemini unavailable")
 
         response = self.client.post(
@@ -66,12 +66,10 @@ class SymptomCheckerFlowTests(TestCase):
             follow=True,
         )
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "Adaptive Symptom Check")
+        self.assertContains(response, "Please run Symptom Checker again.")
 
         flow = self.client.session.get("symptom_checker_flow")
-        self.assertIsNotNone(flow)
-        self.assertEqual(flow["ai_calls"]["questions"], 0)
-        self.assertGreaterEqual(len(flow["questions"]), 8)
+        self.assertFalse(flow)
 
     @patch("symptom_checker.engine.discover_nearby_care_centers")
     @patch("symptom_checker.engine.generate_diagnosis")
@@ -140,3 +138,118 @@ class SymptomCheckerFlowTests(TestCase):
 
         self.client.get("/symptoms/result/")
         self.assertEqual(mock_generate_diagnosis.call_count, 1)
+
+    @patch("symptom_checker.engine.generate_diagnosis")
+    @patch("symptom_checker.engine.generate_questions")
+    def test_result_redirects_to_sc_when_ai_diagnosis_fails(self, mock_generate_questions, mock_generate_diagnosis):
+        mock_generate_questions.return_value = [
+            QuestionItem(id=1, text="Any fever?", type="yesno", options=[]),
+        ]
+        mock_generate_diagnosis.side_effect = AIGenerationError("quota exceeded")
+
+        self.client.post(
+            "/symptoms/question/",
+            data={
+                "age": 20,
+                "gender": "Male",
+                "state": "Mumbai, Maharashtra, India",
+                "symptom": "down syndrome",
+            },
+        )
+        self.client.post("/symptoms/question/", data={"answer": "yes"})
+        response = self.client.get("/symptoms/result/", follow=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Please run Symptom Checker again.")
+        self.assertContains(response, "AI generation failed")
+
+    @patch("symptom_checker.views.suggest_locations")
+    def test_location_suggest_endpoint_returns_api_items(self, mock_suggest_locations):
+        mock_suggest_locations.return_value = ["Andheri West, Mumbai, Maharashtra"]
+        response = self.client.get("/symptoms/location-suggest/?q=andheri")
+        self.assertEqual(response.status_code, 200)
+        self.assertJSONEqual(response.content, {"items": ["Andheri West, Mumbai, Maharashtra"]})
+
+    @patch("symptom_checker.views.generate_symptom_suggestions")
+    def test_symptom_suggest_endpoint_returns_ai_items(self, mock_generate_symptom_suggestions):
+        mock_generate_symptom_suggestions.return_value = ["Down syndrome"]
+        response = self.client.get("/symptoms/symptom-suggest/?q=down")
+        self.assertEqual(response.status_code, 200)
+        self.assertJSONEqual(response.content, {"items": ["Down syndrome"]})
+
+    @patch("symptom_checker.engine.discover_nearby_care_centers")
+    @patch("symptom_checker.engine.generate_diagnosis")
+    @patch("symptom_checker.engine.generate_questions")
+    def test_guest_can_run_sc_once_then_login_is_required(
+        self,
+        mock_generate_questions,
+        mock_generate_diagnosis,
+        mock_discover_centers,
+    ):
+        mock_generate_questions.return_value = [
+            QuestionItem(id=1, text="Any fever?", type="yesno", options=[]),
+        ]
+        mock_generate_diagnosis.return_value = DiagnosisResult(
+            conditions=[
+                DiagnosisCondition(
+                    name="General check",
+                    likelihood="Moderate",
+                    reasoning="Basic screening outcome.",
+                    specialization="General Medicine",
+                )
+            ],
+            urgency="Moderate",
+            advice="Monitor and follow guidance.",
+        )
+        mock_discover_centers.return_value = []
+
+        self.client.post(
+            "/symptoms/question/",
+            data={
+                "age": 20,
+                "gender": "Male",
+                "state": "Mumbai, Maharashtra, India",
+                "symptom": "headache",
+            },
+        )
+        self.client.post("/symptoms/question/", data={"answer": "yes"})
+        result_response = self.client.get("/symptoms/result/")
+        self.assertEqual(result_response.status_code, 200)
+        self.assertTrue(self.client.session.get("symptom_checker_guest_used_once"))
+
+        second_attempt = self.client.post(
+            "/symptoms/question/",
+            data={
+                "age": 20,
+                "gender": "Male",
+                "state": "Mumbai, Maharashtra, India",
+                "symptom": "fever",
+            },
+            follow=True,
+        )
+        self.assertEqual(second_attempt.status_code, 200)
+        self.assertContains(second_attempt, "Guest access allows one Symptom Checker run. Please login to continue.")
+        self.assertContains(second_attempt, "Login Required")
+
+    @patch("symptom_checker.engine.generate_questions")
+    def test_logged_in_user_is_not_limited_by_guest_usage_flag(self, mock_generate_questions):
+        mock_generate_questions.return_value = [
+            QuestionItem(id=1, text="Any fever?", type="yesno", options=[]),
+        ]
+        self.client.login(username="writer1", password="test-pass-123")
+        session = self.client.session
+        session["symptom_checker_guest_used_once"] = True
+        session.save()
+
+        response = self.client.post(
+            "/symptoms/question/",
+            data={
+                "age": 21,
+                "gender": "Male",
+                "state": "Mumbai, Maharashtra, India",
+                "symptom": "skin rash",
+            },
+            follow=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Any fever?")

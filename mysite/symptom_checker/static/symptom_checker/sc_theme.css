@@ -366,6 +366,39 @@ body.sc-page {
     margin-top: 14px;
 }
 
+.sc-suggest-wrap {
+    position: relative;
+}
+
+.sc-suggest-menu {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: calc(100% + 4px);
+    z-index: 10;
+    background: #ffffff;
+    border: 1px solid #d7e4f2;
+    border-radius: 12px;
+    box-shadow: 0 12px 24px rgba(16, 42, 67, 0.12);
+    max-height: 220px;
+    overflow-y: auto;
+}
+
+.sc-suggest-item {
+    width: 100%;
+    text-align: left;
+    border: 0;
+    background: transparent;
+    padding: 10px 12px;
+    cursor: pointer;
+    color: #14395d;
+    font-size: 14px;
+}
+
+.sc-suggest-item:hover {
+    background: #f0f7ff;
+}
+
 @media (max-width: 960px) {
     .sc-grid-cards {
         grid-template-columns: 1fr;

@@ -19,10 +19,14 @@
                 <p class="sc-subtitle">A guided, adaptive check that asks focused questions and gives urgency-based recommendations.</p>
             </header>
 
-            <form class="sc-body" method="POST" action="/symptoms/question/">
+            <form class="sc-body" method="POST" action="/symptoms/question/" autocomplete="off">
                 {% csrf_token %}
                 {% if error_message %}
                 <p class="sc-alert sc-alert-error">{{ error_message }}</p>
+                {% endif %}
+                {% if guest_limit_message %}
+                <p class="sc-alert">{{ guest_limit_message }}</p>
+                <a class="sc-btn sc-btn-ghost" style="margin-bottom:10px;" href="/login/?next=/symptoms/">Login to Continue</a>
                 {% endif %}
 
                 <div class="sc-grid-12">
@@ -42,79 +46,117 @@
 
                     <div class="sc-field sc-col-12">
                         <label class="sc-label" for="state">Location (India)</label>
-                        <input
-                            class="sc-input"
-                            id="state"
-                            type="text"
-                            name="state"
-                            list="location-suggestions"
-                            autocomplete="off"
-                            value="{{ form_data.state|default:'' }}"
-                            placeholder="Type area, road, city, district, state"
-                            required
-                        >
-                        <datalist id="location-suggestions"></datalist>
+                        <div class="sc-suggest-wrap">
+                            <input
+                                class="sc-input"
+                                id="state"
+                                type="text"
+                                name="state"
+                                autocomplete="off"
+                                autocapitalize="off"
+                                spellcheck="false"
+                                value="{{ form_data.state|default:'' }}"
+                                placeholder="Enter your full location (area, city, state)"
+                                required
+                            >
+                            <div id="state-suggest-menu" class="sc-suggest-menu" hidden></div>
+                        </div>
                     </div>
 
                     <div class="sc-field sc-col-12">
                         <label class="sc-label" for="symptom">Main Symptom / Disease</label>
-                        <input
-                            class="sc-input"
-                            id="symptom"
-                            type="text"
-                            name="symptom"
-                            list="symptom-suggestions"
-                            autocomplete="off"
-                            value="{{ form_data.symptom|default:'' }}"
-                            placeholder="e.g., fungal infection, fever, chest pain"
-                            required
-                        >
-                        <datalist id="symptom-suggestions"></datalist>
+                        <div class="sc-suggest-wrap">
+                            <input
+                                class="sc-input"
+                                id="symptom"
+                                type="text"
+                                name="symptom"
+                                autocomplete="off"
+                                autocapitalize="off"
+                                spellcheck="false"
+                                value="{{ form_data.symptom|default:'' }}"
+                                placeholder="Enter your main symptom"
+                                required
+                            >
+                            <div id="symptom-suggest-menu" class="sc-suggest-menu" hidden></div>
+                        </div>
                     </div>
                 </div>
 
                 <p class="sc-tip">This tool is informational and does not replace professional medical diagnosis.</p>
-                <button class="sc-btn sc-btn-block" style="margin-top:12px;" type="submit">Start Adaptive Check</button>
+                <button
+                    class="sc-btn sc-btn-block"
+                    style="margin-top:12px;{% if guest_limit_message %}opacity:0.65;cursor:not-allowed;{% endif %}"
+                    type="submit"
+                    {% if guest_limit_message %}disabled{% endif %}
+                >
+                    {% if guest_limit_message %}Login Required{% else %}Start Adaptive Check{% endif %}
+                </button>
             </form>
         </section>
     </main>
-
     <script>
     (function () {
-        function wireAutocomplete(inputId, listId, endpoint, minChars) {
+        function wireSuggest(inputId, menuId, endpoint) {
             const input = document.getElementById(inputId);
-            const list = document.getElementById(listId);
-            if (!input || !list) return;
+            const menu = document.getElementById(menuId);
+            if (!input || !menu) return;
 
             let timer = null;
-            input.addEventListener("input", function () {
-                const q = input.value.trim();
-                if (timer) {
-                    clearTimeout(timer);
-                }
-                if (q.length < minChars) {
-                    list.innerHTML = "";
+            const hideMenu = function () {
+                menu.innerHTML = "";
+                menu.hidden = true;
+            };
+
+            const showItems = function (items) {
+                if (!Array.isArray(items) || !items.length) {
+                    hideMenu();
                     return;
                 }
+                menu.innerHTML = items.map((item) => (
+                    `<button type="button" class="sc-suggest-item" data-value="${String(item).replace(/"/g, "&quot;")}">${item}</button>`
+                )).join("");
+                menu.hidden = false;
+            };
 
+            input.addEventListener("input", function () {
+                const q = input.value.trim();
+                if (timer) clearTimeout(timer);
+                if (q.length < 2) {
+                    hideMenu();
+                    return;
+                }
                 timer = setTimeout(async function () {
                     try {
-                        const resp = await fetch(endpoint + encodeURIComponent(q));
-                        if (!resp.ok) return;
-                        const data = await resp.json();
-                        const items = Array.isArray(data.items) ? data.items : [];
-                        list.innerHTML = items
-                            .map((text) => `<option value="${String(text).replace(/"/g, "&quot;")}"></option>`)
-                            .join("");
+                        const res = await fetch(endpoint + encodeURIComponent(q));
+                        if (!res.ok) {
+                            hideMenu();
+                            return;
+                        }
+                        const data = await res.json();
+                        showItems(data.items || []);
                     } catch (_) {
-                        // Keep form usable even if suggestions fail.
+                        hideMenu();
                     }
-                }, 160);
+                }, 140);
+            });
+
+            menu.addEventListener("click", function (event) {
+                const btn = event.target.closest(".sc-suggest-item");
+                if (!btn) return;
+                input.value = btn.getAttribute("data-value") || "";
+                hideMenu();
+                input.focus();
+            });
+
+            document.addEventListener("click", function (event) {
+                if (event.target === input || menu.contains(event.target)) return;
+                hideMenu();
             });
         }
 
-        wireAutocomplete("state", "location-suggestions", "/symptoms/location-suggest/?q=", 2);
-        wireAutocomplete("symptom", "symptom-suggestions", "/symptoms/symptom-suggest/?q=", 2);
+        wireSuggest("state", "state-suggest-menu", "/symptoms/location-suggest/?q=");
+        wireSuggest("symptom", "symptom-suggest-menu", "/symptoms/symptom-suggest/?q=");
     })();
     </script>
 </body>

@@ -136,11 +136,10 @@ body {
     <section class="panel hero">
         <h1>Final Assessment</h1>
         <p>Diagnosis generated after completing the AI question set.</p>
-        {% if ai_error %}
-        <p style="margin-top:10px;color:#9d1e1e;font-weight:700;">AI status: unavailable ({{ ai_error }})</p>
-        {% else %}
-        <p style="margin-top:10px;color:#17613e;font-weight:700;">AI status: generated and validated.</p>
-        {% endif %}
+        <p style="margin-top:10px;color:#17613e;font-weight:700;">
+            AI status: Questions={{ ai_generation.questions_ai|yesno:"Generated,Not generated" }} |
+            Diagnosis={{ ai_generation.diagnosis_ai|yesno:"Generated,Not generated" }}
+        </p>
         <div class="badge">Urgency: {{ urgency }}</div>
         <div class="risk">{{ risk_banner }}</div>
     </section>
@@ -311,18 +310,36 @@ body {
     </section>
 
     <section class="panel">
-        <h3>Collectible Community Tag</h3>
-        {% if collectible.tag_code %}
-        <div class="tag">{{ collectible.tag_code }}</div>
-        <p>{{ collectible.label }}</p>
+        <h3>Community Access</h3>
+        {% if community_access.message %}
+        <p>{{ community_access.message }}</p>
+        {% endif %}
+        {% if community_access.status == "approved" %}
+        <div class="tag">{{ community_access.tag_code }}</div>
         <div class="row">
-            <a class="btn" href="{{ collectible.community_url }}">Use Tag in Community</a>
+            <a class="btn" href="{{ community_access.community_url|default:'/community/' }}">Open Chat</a>
+            <a class="btn" href="/symptoms/reset/">Start New Check</a>
+        </div>
+        {% elif community_access.status == "pending" %}
+        <div class="tag">{{ community_access.tag_code }}</div>
+        <div class="row">
+            <a class="btn" href="{{ community_access.community_url|default:'/community/' }}">Request Access</a>
+            <a class="btn" href="/symptoms/reset/">Start New Check</a>
+        </div>
+        {% elif community_access.status == "emergency" %}
+        <div class="row">
             <a class="btn" href="/symptoms/reset/">Start New Check</a>
         </div>
         {% else %}
-        <p>No collectible tag available.</p>
+        <div class="row">
+            {% if request.user.is_authenticated %}
+            <a class="btn" href="/community/">Check Access</a>
+            {% else %}
+            <a class="btn" href="/login/?next=/community/">Login to Unlock Chat</a>
+            {% endif %}
+            <a class="btn" href="/symptoms/reset/">Start New Check</a>
+        </div>
         {% endif %}
-        <p class="subtle">AI calls this session: Questions={{ ai_calls.questions|default:0 }}, Diagnosis={{ ai_calls.diagnosis|default:0 }}</p>
     </section>
 </div>
 </body>

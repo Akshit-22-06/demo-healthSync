@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from django.conf import settings
 from django.http import JsonResponse
 from django.shortcuts import redirect, render
 from django.urls import reverse
 
 from symptom_checker.ai_client import AIGenerationError, generate_symptom_suggestions
 from symptom_checker.engine import (
+    SESSION_KEY,
     get_or_build_result,
     has_active_session,
     question_context,
@@ -17,146 +17,38 @@ from symptom_checker.engine import (
 from symptom_checker.schemas import IntakeData
 from symptom_checker.services.care_discovery import suggest_locations
 
-_COMMON_INDIAN_LOCATIONS = [
-    "Ahmedabad, Gujarat",
-    "Ankleshwar, Gujarat",
-    "Bharuch, Gujarat",
-    "Surat, Gujarat",
-    "Vadodara, Gujarat",
-    "Rajkot, Gujarat",
-    "Bhavnagar, Gujarat",
-    "Jamnagar, Gujarat",
-    "Gandhinagar, Gujarat",
-    "Mumbai, Maharashtra",
-    "Pune, Maharashtra",
-    "Nagpur, Maharashtra",
-    "Nashik, Maharashtra",
-    "Aurangabad, Maharashtra",
-    "Thane, Maharashtra",
-    "Delhi",
-    "Noida, Uttar Pradesh",
-    "Gurugram, Haryana",
-    "Ghaziabad, Uttar Pradesh",
-    "Lucknow, Uttar Pradesh",
-    "Kanpur, Uttar Pradesh",
-    "Varanasi, Uttar Pradesh",
-    "Jaipur, Rajasthan",
-    "Jodhpur, Rajasthan",
-    "Udaipur, Rajasthan",
-    "Kota, Rajasthan",
-    "Bhopal, Madhya Pradesh",
-    "Indore, Madhya Pradesh",
-    "Gwalior, Madhya Pradesh",
-    "Jabalpur, Madhya Pradesh",
-    "Bengaluru, Karnataka",
-    "Mysuru, Karnataka",
-    "Mangaluru, Karnataka",
-    "Hubballi, Karnataka",
-    "Chennai, Tamil Nadu",
-    "Coimbatore, Tamil Nadu",
-    "Madurai, Tamil Nadu",
-    "Tiruchirappalli, Tamil Nadu",
-    "Hyderabad, Telangana",
-    "Warangal, Telangana",
-    "Nizamabad, Telangana",
-    "Kolkata, West Bengal",
-    "Howrah, West Bengal",
-    "Siliguri, West Bengal",
-    "Patna, Bihar",
-    "Gaya, Bihar",
-    "Ranchi, Jharkhand",
-    "Jamshedpur, Jharkhand",
-    "Bhubaneswar, Odisha",
-    "Cuttack, Odisha",
-    "Visakhapatnam, Andhra Pradesh",
-    "Vijayawada, Andhra Pradesh",
-    "Guntur, Andhra Pradesh",
-    "Kochi, Kerala",
-    "Thiruvananthapuram, Kerala",
-    "Kozhikode, Kerala",
-    "Amritsar, Punjab",
-    "Ludhiana, Punjab",
-    "Chandigarh",
-    "Dehradun, Uttarakhand",
-    "Shimla, Himachal Pradesh",
-    "Srinagar, Jammu and Kashmir",
-    "Jammu, Jammu and Kashmir",
-    "Guwahati, Assam",
-    "Shillong, Meghalaya",
-    "Imphal, Manipur",
-    "Aizawl, Mizoram",
-    "Agartala, Tripura",
-    "Gangtok, Sikkim",
-    "Panaji, Goa",
-    "Puducherry",
-]
 
-_COMMON_MEDICAL_TERMS = [
-    "fever",
-    "viral fever",
-    "dengue",
-    "malaria",
-    "typhoid",
-    "cold and cough",
-    "sore throat",
-    "sinus infection",
-    "asthma",
-    "bronchitis",
-    "pneumonia",
-    "chest pain",
-    "high blood pressure",
-    "diabetes",
-    "thyroid disorder",
-    "migraine",
-    "headache",
-    "food poisoning",
-    "gastritis",
-    "acidity",
-    "diarrhea",
-    "constipation",
-    "kidney stone",
-    "urinary infection",
-    "skin rash",
-    "fungal infection",
-    "eczema",
-    "psoriasis",
-    "acne",
-    "allergy",
-    "joint pain",
-    "arthritis",
-    "back pain",
-    "neck pain",
-    "depression",
-    "anxiety",
-    "insomnia",
-    "hiv",
-    "aids",
-    "covid-19",
-]
+GUEST_SC_USED_KEY = "symptom_checker_guest_used_once"
 
 
-def _merge_suggestions(primary: list[str], fallback: list[str], *, max_items: int) -> list[str]:
-    out: list[str] = []
-    seen: set[str] = set()
-    for source in (primary, fallback):
-        for item in source:
-            text = (item or "").strip()
-            if not text:
-                continue
-            key = text.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append(text)
-            if len(out) >= max_items:
-                return out
-    return out
+def _guest_limit_reached(request) -> bool:
+    return (not getattr(request.user, "is_authenticated", False)) and bool(
+        request.session.get(GUEST_SC_USED_KEY)
+    )
+
+
+def _guest_limit_message(request) -> str:
+    if _guest_limit_reached(request):
+        return "Guest access allows one Symptom Checker run. Please login to continue."
+    return ""
+
+
+def _render_start(request, *, error_message: str = "", form_data: dict | None = None):
+    context = {}
+    if error_message:
+        context["error_message"] = error_message
+    if form_data:
+        context["form_data"] = form_data
+    guest_limit_message = _guest_limit_message(request)
+    if guest_limit_message:
+        context["guest_limit_message"] = guest_limit_message
+    return render(request, "symptom_checker/start.html", context)
 
 
 def start(request):
     if request.method == "POST":
         return redirect("question")
-    return render(request, "symptom_checker/start.html")
+    return _render_start(request)
 
 
 def question(request):
@@ -166,35 +58,52 @@ def question(request):
         state = (request.POST.get("state") or "").strip()
         age_raw = (request.POST.get("age") or "").strip()
         form_data = {"symptom": symptom, "gender": gender or "Male", "state": state, "age": age_raw}
-        if not symptom:
-            return render(
+
+        if _guest_limit_reached(request):
+            return _render_start(
                 request,
-                "symptom_checker/start.html",
-                {"error_message": "Please enter your main symptom.", "form_data": form_data},
+                error_message="Login is required for another Symptom Checker run.",
+                form_data=form_data,
+            )
+
+        if not symptom:
+            return _render_start(
+                request,
+                error_message="Please enter your main symptom.",
+                form_data=form_data,
+            )
+
+        if not state:
+            return _render_start(
+                request,
+                error_message="Please enter your location.",
+                form_data=form_data,
             )
 
         try:
             age = int(age_raw) if age_raw else None
         except ValueError:
-            return render(
+            return _render_start(
                 request,
-                "symptom_checker/start.html",
-                {"error_message": "Age must be a number.", "form_data": form_data},
+                error_message="Age must be a number.",
+                form_data=form_data,
             )
 
         intake = IntakeData(age=age, gender=gender, state=state, symptom=symptom)
         try:
             start_session(request, intake)
         except AIGenerationError as exc:
-            return render(
+            return _render_start(
                 request,
-                "symptom_checker/start.html",
-                {"error_message": f"Live AI question generation failed: {exc}", "form_data": form_data},
+                error_message=f"AI generation failed ({exc}). Please run Symptom Checker again.",
+                form_data=form_data,
             )
         return redirect("question")
 
     if request.method == "POST" and "answer" in request.POST:
         if not has_active_session(request):
+            if _guest_limit_reached(request):
+                return _render_start(request)
             return redirect("symptom_home")
         answer_value = (request.POST.get("answer") or "").strip()
         if answer_value:
@@ -216,7 +125,7 @@ def question(request):
             "step": context["step"],
             "total": context["total"],
             "progress": context["progress"],
-            "questions_source": context.get("questions_source", "fallback"),
+            "questions_source": context.get("questions_source", "ai"),
             "question_error": context.get("question_error", ""),
         },
     )
@@ -224,11 +133,34 @@ def question(request):
 
 def result_page(request):
     if not has_active_session(request):
+        if _guest_limit_reached(request):
+            return _render_start(request)
         return redirect("symptom_home")
 
-    result = get_or_build_result(request)
+    try:
+        result = get_or_build_result(request)
+    except AIGenerationError as exc:
+        flow = request.session.get(SESSION_KEY, {})
+        intake_data = flow.get("intake", {}) if isinstance(flow, dict) else {}
+        form_data = {
+            "age": intake_data.get("age") or "",
+            "gender": intake_data.get("gender") or "Male",
+            "state": intake_data.get("state") or "",
+            "symptom": intake_data.get("symptom") or "",
+        }
+        reset_session(request)
+        return _render_start(
+            request,
+            error_message=f"AI generation failed ({exc}). Please run Symptom Checker again.",
+            form_data=form_data,
+        )
+
     if not result:
         return redirect("symptom_home")
+
+    if not getattr(request.user, "is_authenticated", False):
+        request.session[GUEST_SC_USED_KEY] = True
+        request.session.modified = True
 
     diagnosis = result.get("diagnosis", {})
     conditions = diagnosis.get("conditions", [])
@@ -242,12 +174,12 @@ def result_page(request):
             "advice": diagnosis.get("advice", ""),
             "risk_banner": result.get("risk_banner", ""),
             "recommended_centers": result.get("recommended_centers", []),
-            "recommended_specializations": result.get("recommended_specializations", []),
             "search_center": result.get("search_center", {}),
             "recommended_articles": result.get("recommended_articles", []),
             "next_24h_plan": result.get("next_24h_plan", []),
             "health_tips": result.get("health_tips", []),
-            "collectible": result.get("community_collectible", {}),
+            "community_access": result.get("community_access", {}),
+            "ai_generation": result.get("ai_generation", {}),
             "ai_calls": result.get("ai_calls", {}),
             "ai_error": result.get("ai_error", ""),
         },
@@ -260,30 +192,14 @@ def reset_flow(request):
 
 
 def location_suggest(request):
-    query = (request.GET.get("q") or "").strip()
-    if len(query) < 2:
-        return JsonResponse({"items": []})
-
-    live = suggest_locations(query, limit=40)
-    q = query.lower()
-    fallback = [loc for loc in _COMMON_INDIAN_LOCATIONS if q in loc.lower()]
-    items = _merge_suggestions(live, fallback, max_items=40)
-    return JsonResponse({"items": items})
+    query = request.GET.get("q", "")
+    return JsonResponse({"items": suggest_locations(query, limit=10)})
 
 
 def symptom_suggest(request):
-    query = (request.GET.get("q") or "").strip()
-    if len(query) < 2:
-        return JsonResponse({"items": []})
-
-    q = query.lower()
-    fallback = [term for term in _COMMON_MEDICAL_TERMS if q in term.lower()]
-
-    live: list[str] = []
-    ai_enabled = bool(getattr(settings, "ENABLE_AI_SYMPTOM_AUTOCOMPLETE", False))
-    if ai_enabled and len(query) >= 4 and len(fallback) < 10:
-        live = generate_symptom_suggestions(query, max_items=8)
-
-    items = _merge_suggestions(fallback, live, max_items=12)
+    query = request.GET.get("q", "")
+    try:
+        items = generate_symptom_suggestions(query, max_items=10)
+    except AIGenerationError:
+        items = []
     return JsonResponse({"items": items})
-

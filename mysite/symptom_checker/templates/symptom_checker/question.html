@@ -20,12 +20,7 @@
         </header>
 
         <div class="sc-body">
-            {% if questions_source != "ai" %}
-            <p class="sc-alert sc-alert-error">
-                Live AI questions are temporarily unavailable. Using local fallback questions.
-                {% if question_error %}<br>{{ question_error }}{% endif %}
-            </p>
-            {% endif %}
+            <p class="sc-alert">AI Status: Generated</p>
 
             <div class="sc-progress-wrap"><div class="sc-progress" style="width: {{ progress }}%;"></div></div>
             <p class="sc-step">Step {{ step }} of {{ total }}</p>
