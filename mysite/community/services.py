@@ -3,82 +3,18 @@ from __future__ import annotations
 from datetime import timedelta
 
 from django.contrib.auth.models import AnonymousUser
-from django.utils.text import slugify
 from django.utils import timezone
 
+from community.catalog import *  # noqa: F401,F403
 from community.models import CommunityAccessTag, CommunityMessage, CommunityRoom, SymptomCheckSnapshot
 
-SERIOUS_CONFIDENCE_THRESHOLD = 0.60
-SERIOUS_RECURRENCE_THRESHOLD = 1
-SERIOUS_WINDOW_DAYS = 90
-CHAT_CATEGORY = "GROUP"
-
-ROOM_PRESETS: tuple[tuple[str, str, str, str], ...] = (
-    (
-        "community-support-chat",
-        CHAT_CATEGORY,
-        "Community Support Chat",
-        "Unified group chat for users with validated access.",
-    ),
-)
-
-SUPPORT_KEYWORDS: tuple[str, ...] = (
-    "anxiety",
-    "autism",
-    "adhd",
-    "developmental delay",
-    "depression",
-    "down syndrome",
-    "intellectual disability",
-    "learning disability",
-    "cognitive disorder",
-    "cognitive impairment",
-    "panic",
-    "stress",
-    "insomnia",
-    "trauma",
-    "ptsd",
-    "bipolar",
-    "mood",
-    "schizo",
-    "ocd",
-    "self harm",
-    "suicidal",
-    "hallucination",
-)
-
-EMERGENCY_PHRASES: tuple[str, ...] = (
-    "cannot breathe",
-    "can't breathe",
-    "severe chest pain",
-    "unconscious",
-    "heavy bleeding",
-    "suicidal",
-    "suicide",
-)
-
-HARMFUL_ADVICE_PHRASES: tuple[str, ...] = (
-    "stop your medicine",
-    "ignore doctor",
-    "don't go to hospital",
-    "dont go to hospital",
-    "overdose",
-    "take double dose",
-    "self medicate",
-)
-
-LIKELIHOOD_TO_CONFIDENCE: dict[str, float] = {
-    "very high": 0.92,
-    "high": 0.84,
-    "moderate": 0.70,
-    "medium": 0.70,
-    "low": 0.52,
-    "very low": 0.40,
-}
+MIN_CONFIDENCE_FOR_AUTO_APPROVAL = 0.60
+MIN_SERIOUS_CASES_FOR_AUTO_APPROVAL = 1
+SERIOUS_CASE_LOOKBACK_DAYS = 90
 
 
-def ensure_default_rooms() -> None:
-    for code, category, name, description in ROOM_PRESETS:
+def sync_default_community_rooms() -> None:
+    for code, category, name, description in DEFAULT_COMMUNITY_ROOMS:
         room, created = CommunityRoom.objects.get_or_create(
             code=code,
             defaults={
@@ -105,10 +41,11 @@ def ensure_default_rooms() -> None:
             if changed:
                 room.save(update_fields=["category", "name", "description", "is_active"])
 
-    CommunityRoom.objects.exclude(category=CHAT_CATEGORY).update(is_active=False)
+    preset_codes = [code for code, _, _, _ in DEFAULT_COMMUNITY_ROOMS]
+    CommunityRoom.objects.exclude(code__in=preset_codes).update(is_active=False)
 
 
-def normalize_risk_level(urgency: str) -> str:
+def map_urgency_to_risk_level(urgency: str) -> str:
     normalized = (urgency or "").strip().lower()
     if normalized in {"emergency", "critical"}:
         return SymptomCheckSnapshot.RiskLevel.EMERGENCY
@@ -119,12 +56,12 @@ def normalize_risk_level(urgency: str) -> str:
     return SymptomCheckSnapshot.RiskLevel.LOW
 
 
-def _estimate_confidence(diagnosis: dict) -> float:
+def estimate_confidence_from_diagnosis(diagnosis: dict) -> float:
     conditions = diagnosis.get("conditions") or []
     if conditions and isinstance(conditions[0], dict):
         likelihood = str(conditions[0].get("likelihood", "")).strip().lower()
-        if likelihood in LIKELIHOOD_TO_CONFIDENCE:
-            return LIKELIHOOD_TO_CONFIDENCE[likelihood]
+        if likelihood in LIKELIHOOD_CONFIDENCE_MAP:
+            return LIKELIHOOD_CONFIDENCE_MAP[likelihood]
     urgency = (diagnosis.get("urgency") or "").strip().lower()
     if urgency in {"high", "serious"}:
         return 0.72
@@ -133,7 +70,7 @@ def _estimate_confidence(diagnosis: dict) -> float:
     return 0.48
 
 
-def _top_condition_name(diagnosis: dict) -> str:
+def extract_top_condition_name(diagnosis: dict) -> str:
     conditions = diagnosis.get("conditions") or []
     if not conditions:
         return ""
@@ -143,21 +80,42 @@ def _top_condition_name(diagnosis: dict) -> str:
     return (first.get("name") or "").strip()
 
 
-def _infer_category(*, symptom: str, top_condition: str) -> str:
+def parse_intake_age(intake: dict) -> int | None:
+    raw = (intake or {}).get("age")
+    if raw in (None, ""):
+        return None
+    try:
+        age = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return age if age >= 0 else None
+
+
+def contains_any_keyword(source: str, keywords: tuple[str, ...]) -> bool:
+    return any(token in source for token in keywords)
+
+
+def infer_condition_category(*, symptom: str, top_condition: str, age: int | None) -> str:
     source = f"{symptom} {top_condition}".strip().lower()
-    if not source:
-        return "GENERAL"
-    if any(token in source for token in SUPPORT_KEYWORDS):
-        return CHAT_CATEGORY
-    return "GENERAL"
+    if age is not None and age >= 60:
+        return CATEGORY_SENIOR
+    if age is not None and age <= 16 and contains_any_keyword(
+        source, CATEGORY_KEYWORDS[CATEGORY_CHILD_DEV]
+    ):
+        return CATEGORY_CHILD_DEV
+
+    for category in CATEGORY_MATCH_PRIORITY:
+        if contains_any_keyword(source, CATEGORY_KEYWORDS.get(category, ())):
+            return category
+    return CATEGORY_GENERAL
 
 
-def _build_tag_code(*, category: str, recurrence_count: int) -> str:
+def build_community_tag_code(*, category: str, recurrence_count: int) -> str:
     severity = "CHRONIC" if recurrence_count >= 3 else "SEVERE"
     return f"{category}_{severity}"
 
 
-def _is_authenticated_user(user) -> bool:
+def is_authenticated_app_user(user) -> bool:
     if not user:
         return False
     if isinstance(user, AnonymousUser):
@@ -165,8 +123,8 @@ def _is_authenticated_user(user) -> bool:
     return bool(getattr(user, "is_authenticated", False))
 
 
-def _serious_count_for_category(*, user, category: str) -> int:
-    window_start = timezone.now() - timedelta(days=SERIOUS_WINDOW_DAYS)
+def count_recent_serious_cases_for_category(*, user, category: str) -> int:
+    window_start = timezone.now() - timedelta(days=SERIOUS_CASE_LOOKBACK_DAYS)
     return SymptomCheckSnapshot.objects.filter(
         user=user,
         risk_level=SymptomCheckSnapshot.RiskLevel.SERIOUS,
@@ -175,8 +133,15 @@ def _serious_count_for_category(*, user, category: str) -> int:
     ).count()
 
 
-def evaluate_community_eligibility(*, user, intake: dict, diagnosis: dict) -> dict:
-    outcome = {
+def get_active_room_for_category(category: str) -> CommunityRoom | None:
+    room_code = CATEGORY_TO_ROOM_CODE.get(category)
+    if not room_code:
+        return None
+    return CommunityRoom.objects.filter(code=room_code, is_active=True).first()
+
+
+def evaluate_chat_access_eligibility(*, user, intake: dict, diagnosis: dict) -> dict:
+    access_decision = {
         "status": "locked",
         "tag_code": "",
         "category": "",
@@ -187,19 +152,22 @@ def evaluate_community_eligibility(*, user, intake: dict, diagnosis: dict) -> di
         "community_url": "/community/",
         "message": "Complete a Symptom Checker session to determine community eligibility.",
     }
-    if not _is_authenticated_user(user):
-        outcome["message"] = "Login is required to unlock community eligibility from Symptom Checker."
-        return outcome
+    if not is_authenticated_app_user(user):
+        access_decision["message"] = "Login is required to unlock community eligibility from Symptom Checker."
+        return access_decision
+
+    sync_default_community_rooms()
 
     symptom = str((intake or {}).get("symptom", "")).strip()
     urgency = str((diagnosis or {}).get("urgency", "")).strip()
-    top_condition = _top_condition_name(diagnosis)
-    confidence = _estimate_confidence(diagnosis)
-    risk_level = normalize_risk_level(urgency)
-    category = _infer_category(symptom=symptom, top_condition=top_condition)
+    top_condition = extract_top_condition_name(diagnosis)
+    confidence = estimate_confidence_from_diagnosis(diagnosis)
+    risk_level = map_urgency_to_risk_level(urgency)
+    age = parse_intake_age(intake)
+    category = infer_condition_category(symptom=symptom, top_condition=top_condition, age=age)
 
-    historical_serious = _serious_count_for_category(user=user, category=category)
-    recurrence_count = historical_serious + (1 if category == CHAT_CATEGORY else 0)
+    historical_serious = count_recent_serious_cases_for_category(user=user, category=category)
+    recurrence_count = historical_serious + 1
 
     SymptomCheckSnapshot.objects.create(
         user=user,
@@ -212,7 +180,7 @@ def evaluate_community_eligibility(*, user, intake: dict, diagnosis: dict) -> di
         recurrence_count=recurrence_count,
     )
 
-    outcome.update(
+    access_decision.update(
         {
             "category": category,
             "risk_level": risk_level,
@@ -222,35 +190,32 @@ def evaluate_community_eligibility(*, user, intake: dict, diagnosis: dict) -> di
     )
 
     if risk_level == SymptomCheckSnapshot.RiskLevel.EMERGENCY:
-        outcome["status"] = "emergency"
-        outcome["message"] = "Emergency risk detected. Community chat is disabled; seek immediate medical care."
-        return outcome
+        access_decision["status"] = "emergency"
+        access_decision["message"] = (
+            "Emergency risk detected. Community chat is disabled; seek immediate medical care."
+        )
+        return access_decision
 
-    if category != CHAT_CATEGORY:
-        outcome["message"] = "Assessment does not match current chat access category."
-        return outcome
-
-    if confidence < SERIOUS_CONFIDENCE_THRESHOLD:
-        outcome["message"] = (
+    if confidence < MIN_CONFIDENCE_FOR_AUTO_APPROVAL:
+        access_decision["message"] = (
             "Serious risk detected but confidence is below threshold. "
             "Repeat Symptom Checker if symptoms persist."
         )
-        return outcome
+        return access_decision
 
-    if recurrence_count < SERIOUS_RECURRENCE_THRESHOLD:
-        outcome["message"] = (
-            f"Serious risk found. Recurrence check is {recurrence_count}/{SERIOUS_RECURRENCE_THRESHOLD}; "
+    if recurrence_count < MIN_SERIOUS_CASES_FOR_AUTO_APPROVAL:
+        access_decision["message"] = (
+            f"Serious risk found. Recurrence check is {recurrence_count}/{MIN_SERIOUS_CASES_FOR_AUTO_APPROVAL}; "
             "community tag will generate after recurrence threshold is met."
         )
-        return outcome
+        return access_decision
 
-    tag_code = _build_tag_code(category=category, recurrence_count=recurrence_count)
-    room_seed = top_condition or symptom or "Community Support"
-    group_room = _ensure_group_room(room_seed)
+    room = get_active_room_for_category(category) or get_active_room_for_category(CATEGORY_GENERAL)
+    tag_code = build_community_tag_code(category=category, recurrence_count=recurrence_count)
     tag = (
         CommunityAccessTag.objects.filter(
             user=user,
-            category=CHAT_CATEGORY,
+            category=category,
         )
         .order_by("-updated_at", "-created_at")
         .first()
@@ -260,7 +225,7 @@ def evaluate_community_eligibility(*, user, intake: dict, diagnosis: dict) -> di
         tag = CommunityAccessTag.objects.create(
             user=user,
             tag_code=tag_code,
-            category=CHAT_CATEGORY,
+            category=category,
             risk_level=risk_level,
             confidence_score=confidence,
             recurrence_count=recurrence_count,
@@ -291,19 +256,20 @@ def evaluate_community_eligibility(*, user, intake: dict, diagnosis: dict) -> di
             ]
         )
 
-    outcome.update(
+    access_decision.update(
         {
             "status": "approved",
             "tag_code": tag.tag_code,
+            "category": category,
             "requires_admin_review": False,
             "message": "Access approved. You can join chat.",
-            "community_url": f"/community/room/{group_room.code}/",
+            "community_url": f"/community/room/{room.code}/" if room else "/community/",
         }
     )
-    return outcome
+    return access_decision
 
 
-def _latest_emergency_snapshot(user) -> SymptomCheckSnapshot | None:
+def get_latest_emergency_snapshot(user) -> SymptomCheckSnapshot | None:
     return (
         SymptomCheckSnapshot.objects.filter(
             user=user,
@@ -314,77 +280,39 @@ def _latest_emergency_snapshot(user) -> SymptomCheckSnapshot | None:
     )
 
 
-def _trim_preview(text: str, *, limit: int = 44) -> str:
+def build_preview_text(text: str, *, limit: int = 44) -> str:
     value = (text or "").strip()
     if len(value) <= limit:
         return value
     return value[:limit].rstrip() + "..."
 
 
-def _room_code_for_group(seed: str) -> str:
-    slug = slugify((seed or "").strip())[:42] or "support"
-    return f"group-{slug}"
+def build_user_community_context(user) -> dict:
+    sync_default_community_rooms()
 
-
-def _ensure_group_room(group_seed: str) -> CommunityRoom:
-    group_name = (group_seed or "").strip() or "Community Support"
-    room_code = _room_code_for_group(group_name)
-    room, created = CommunityRoom.objects.get_or_create(
-        code=room_code,
-        defaults={
-            "category": CHAT_CATEGORY,
-            "name": f"{group_name} Group",
-            "description": f"Support chat for {group_name}.",
-            "is_active": True,
-        },
-    )
-    if not created:
-        changed = False
-        expected_name = f"{group_name} Group"
-        expected_desc = f"Support chat for {group_name}."
-        if room.name != expected_name:
-            room.name = expected_name
-            changed = True
-        if room.description != expected_desc:
-            room.description = expected_desc
-            changed = True
-        if not room.is_active:
-            room.is_active = True
-            changed = True
-        if changed:
-            room.save(update_fields=["name", "description", "is_active"])
-    return room
-
-
-def user_community_context(user) -> dict:
-    ensure_default_rooms()
-
-    approved_tags = list(
+    approved_access_tags = list(
         CommunityAccessTag.objects.filter(
             user=user,
             status=CommunityAccessTag.Status.APPROVED,
-            category=CHAT_CATEGORY,
-        ).order_by("-reviewed_at")
+            category__in=ENABLED_COMMUNITY_CATEGORIES,
+        ).order_by("-reviewed_at", "-created_at")
     )
-    pending_tags = list(
+    pending_access_tags = list(
         CommunityAccessTag.objects.filter(
             user=user,
             status=CommunityAccessTag.Status.PENDING,
-            category=CHAT_CATEGORY,
+            category__in=ENABLED_COMMUNITY_CATEGORIES,
         ).order_by("-created_at")
     )
     latest_snapshot = SymptomCheckSnapshot.objects.filter(user=user).order_by("-created_at").first()
-    emergency_snapshot = _latest_emergency_snapshot(user)
+    emergency_snapshot = get_latest_emergency_snapshot(user)
 
-    rooms = list(CommunityRoom.objects.filter(is_active=True, category=CHAT_CATEGORY).order_by("name"))
-    if latest_snapshot and (latest_snapshot.top_condition or latest_snapshot.symptom):
-        room_seed = latest_snapshot.top_condition or latest_snapshot.symptom
-        preferred_code = _room_code_for_group(room_seed)
-        preferred_room = CommunityRoom.objects.filter(code=preferred_code, is_active=True).first()
-        if preferred_room:
-            rooms = [preferred_room]
-    if not approved_tags:
-        rooms = []
+    allowed_categories = {tag.category for tag in approved_access_tags}
+    rooms = (
+        list(CommunityRoom.objects.filter(is_active=True, category__in=allowed_categories).order_by("name"))
+        if allowed_categories
+        else []
+    )
 
     room_previews: list[dict] = []
     for room in rooms:
@@ -398,42 +326,46 @@ def user_community_context(user) -> dict:
                 "group_name": room.name,
                 "total_messages": room_messages.count(),
                 "latest_sender": latest_message.user.username if latest_message else "",
-                "latest_preview": _trim_preview(latest_message.body if latest_message else "No messages yet."),
+                "latest_preview": build_preview_text(
+                    latest_message.body if latest_message else "No messages yet."
+                ),
                 "latest_time": latest_message.created_at if latest_message else None,
             }
         )
 
-    can_access = bool(approved_tags) and emergency_snapshot is None
+    can_access = bool(rooms) and emergency_snapshot is None
     if emergency_snapshot:
         locked_reason = (
             "Emergency severity was detected in your latest serious assessment. "
             "Community access is blocked for safety."
         )
-    elif pending_tags:
-        locked_reason = "Your serious-condition tag is pending admin validation."
+    elif pending_access_tags:
+        locked_reason = "Your access tag is pending admin validation."
     elif latest_snapshot is None:
         locked_reason = "Complete a Symptom Checker session to determine eligibility."
-    elif latest_snapshot.tag_category != CHAT_CATEGORY:
-        locked_reason = "Latest assessment does not match current chat access category."
-    else:
+    elif latest_snapshot.tag_category not in ENABLED_COMMUNITY_CATEGORIES:
+        locked_reason = "Latest assessment does not match available community groups."
+    elif not approved_access_tags:
         locked_reason = "No approved access tag yet. Community remains locked."
+    else:
+        locked_reason = "No active room is available for your approved category."
 
     return {
         "can_access": can_access,
         "rooms": rooms,
         "room_previews": room_previews,
-        "approved_tags": approved_tags,
-        "pending_tags": pending_tags,
+        "approved_tags": approved_access_tags,
+        "pending_tags": pending_access_tags,
         "latest_snapshot": latest_snapshot,
         "locked_reason": locked_reason,
     }
 
 
-def request_pending_access(user) -> tuple[bool, str]:
+def submit_pending_access_request(user) -> tuple[bool, str]:
     approved = CommunityAccessTag.objects.filter(
         user=user,
         status=CommunityAccessTag.Status.APPROVED,
-        category=CHAT_CATEGORY,
+        category__in=ENABLED_COMMUNITY_CATEGORIES,
     ).exists()
     if approved:
         return True, "Community access is already approved."
@@ -442,48 +374,48 @@ def request_pending_access(user) -> tuple[bool, str]:
         CommunityAccessTag.objects.filter(
             user=user,
             status=CommunityAccessTag.Status.PENDING,
-            category=CHAT_CATEGORY,
+            category__in=ENABLED_COMMUNITY_CATEGORIES,
         )
         .order_by("-created_at")
         .first()
     )
     if not pending_tag:
-        return False, "No pending serious-condition tag found. Complete Symptom Checker first."
+        return False, "No pending access tag found. Complete Symptom Checker first."
 
     pending_tag.requested_at = timezone.now()
     pending_tag.save(update_fields=["requested_at", "updated_at"])
     return True, "Community access request submitted for admin validation."
 
 
-def can_user_access_room(*, user, room: CommunityRoom) -> tuple[bool, str, CommunityAccessTag | None]:
-    if _latest_emergency_snapshot(user):
+def check_room_access(*, user, room: CommunityRoom) -> tuple[bool, str, CommunityAccessTag | None]:
+    if get_latest_emergency_snapshot(user):
         return False, "Community access is blocked due to emergency severity status.", None
-    if room.category != CHAT_CATEGORY:
-        return False, "Only the community support room is enabled.", None
+    if room.category not in ENABLED_COMMUNITY_CATEGORIES:
+        return False, "This room category is disabled.", None
 
     approved_tag = (
         CommunityAccessTag.objects.filter(
             user=user,
             status=CommunityAccessTag.Status.APPROVED,
-            category=CHAT_CATEGORY,
+            category=room.category,
         )
         .order_by("-reviewed_at", "-created_at")
         .first()
     )
     if not approved_tag:
-        return False, "You are not validated for this community category.", None
+        return False, "You are not validated for this group category.", None
     return True, "", approved_tag
 
 
-def moderate_chat_message(text: str) -> tuple[bool, str]:
+def validate_chat_message_safety(text: str) -> tuple[bool, str]:
     normalized = (text or "").strip().lower()
     if len(normalized) < 2:
         return False, "Message is too short."
 
-    for phrase in EMERGENCY_PHRASES:
+    for phrase in EMERGENCY_CHAT_PHRASES:
         if phrase in normalized:
             return False, "Emergency phrase detected. Please seek emergency care instead of chat."
-    for phrase in HARMFUL_ADVICE_PHRASES:
+    for phrase in UNSAFE_ADVICE_PHRASES:
         if phrase in normalized:
             return False, "Unsafe advice detected. Message was blocked for safety."
     return True, ""

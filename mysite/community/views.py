@@ -1,13 +1,14 @@
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.shortcuts import get_object_or_404, redirect, render
+from django.views.decorators.cache import never_cache
 
 from community.models import CommunityMessage, CommunityRoom
 from community.services import (
-    can_user_access_room,
-    moderate_chat_message,
-    request_pending_access,
-    user_community_context,
+    build_user_community_context,
+    check_room_access,
+    submit_pending_access_request,
+    validate_chat_message_safety,
 )
 
 
@@ -15,8 +16,9 @@ UNLOCK_NOTICE_KEY_PREFIX = "community_unlocked_notice_seen_"
 
 
 @login_required(login_url="/login/")
-def community(request):
-    context = user_community_context(request.user)
+@never_cache
+def community_home(request):
+    context = build_user_community_context(request.user)
     notice_key = f"{UNLOCK_NOTICE_KEY_PREFIX}{request.user.pk}"
     show_unlocked_notice = bool(context.get("can_access")) and not bool(request.session.get(notice_key))
     context["show_unlocked_notice"] = show_unlocked_notice
@@ -27,11 +29,11 @@ def community(request):
 
 
 @login_required(login_url="/login/")
-def community_request_access(request):
+def submit_community_access_request(request):
     if request.method != "POST":
         return redirect("community")
 
-    ok, info = request_pending_access(request.user)
+    ok, info = submit_pending_access_request(request.user)
     if ok:
         messages.success(request, info)
     else:
@@ -40,9 +42,10 @@ def community_request_access(request):
 
 
 @login_required(login_url="/login/")
-def community_room(request, room_code: str):
+@never_cache
+def community_room_view(request, room_code: str):
     room = get_object_or_404(CommunityRoom, code=room_code, is_active=True)
-    has_access, access_error, access_tag = can_user_access_room(user=request.user, room=room)
+    has_access, access_error, access_tag = check_room_access(user=request.user, room=room)
     if not has_access:
         messages.error(request, access_error)
         return redirect("community")
@@ -50,7 +53,7 @@ def community_room(request, room_code: str):
     if request.method == "POST":
         body = (request.POST.get("message") or "").strip()
         if body:
-            is_allowed, reason = moderate_chat_message(body)
+            is_allowed, reason = validate_chat_message_safety(body)
             if is_allowed:
                 CommunityMessage.objects.create(room=room, user=request.user, body=body)
             else:
@@ -66,7 +69,7 @@ def community_room(request, room_code: str):
         return redirect("community_room", room_code=room.code)
 
     messages_qs = CommunityMessage.objects.filter(room=room, is_blocked=False).select_related("user")
-    context = user_community_context(request.user)
+    context = build_user_community_context(request.user)
     context.update(
         {
             "room": room,

@@ -3,7 +3,18 @@ from django.test import TestCase
 from django.urls import reverse
 
 from community.models import CommunityAccessTag, CommunityMessage, CommunityRoom
-from community.services import CHAT_CATEGORY, ensure_default_rooms, evaluate_community_eligibility
+from community.services import (
+    CATEGORY_GENERAL,
+    CATEGORY_MIND,
+    CATEGORY_SENIOR,
+    CATEGORY_SKIN,
+    ROOM_CODE_GENERAL,
+    ROOM_CODE_MIND,
+    ROOM_CODE_SENIOR,
+    ROOM_CODE_SKIN,
+    evaluate_chat_access_eligibility,
+    sync_default_community_rooms,
+)
 
 
 class CommunityAccessFlowTests(TestCase):
@@ -15,7 +26,7 @@ class CommunityAccessFlowTests(TestCase):
             password="test-pass-123",
         )
         self.client.login(username="community-user", password="test-pass-123")
-        ensure_default_rooms()
+        sync_default_community_rooms()
 
     def test_locked_without_symptom_snapshot_or_tag(self):
         response = self.client.get(reverse("community"))
@@ -27,34 +38,61 @@ class CommunityAccessFlowTests(TestCase):
             "urgency": "High",
             "conditions": [{"name": "Down syndrome support need", "likelihood": "High"}],
         }
-        intake = {"symptom": "down syndrome"}
+        intake = {"symptom": "down syndrome", "age": 20}
 
-        first = evaluate_community_eligibility(user=self.user, intake=intake, diagnosis=diagnosis)
+        first = evaluate_chat_access_eligibility(user=self.user, intake=intake, diagnosis=diagnosis)
         self.assertEqual(first["status"], "approved")
+        self.assertEqual(first["category"], CATEGORY_MIND)
+        self.assertIn(ROOM_CODE_MIND, first["community_url"])
         self.assertTrue(
             CommunityAccessTag.objects.filter(
                 user=self.user,
                 status=CommunityAccessTag.Status.APPROVED,
-                category=CHAT_CATEGORY,
+                category=CATEGORY_MIND,
             ).exists()
         )
 
-    def test_non_matching_case_remains_locked(self):
+    def test_unmapped_case_routes_to_general_group(self):
         diagnosis = {
             "urgency": "High",
-            "conditions": [{"name": "Severe migraine", "likelihood": "High"}],
+            "conditions": [{"name": "Nonspecific condition", "likelihood": "High"}],
         }
-        intake = {"symptom": "headache and dizziness"}
+        intake = {"symptom": "unmapped symptom text"}
 
-        outcome = evaluate_community_eligibility(user=self.user, intake=intake, diagnosis=diagnosis)
-        self.assertEqual(outcome["status"], "locked")
-        self.assertIn("does not match", outcome["message"])
+        outcome = evaluate_chat_access_eligibility(user=self.user, intake=intake, diagnosis=diagnosis)
+        self.assertEqual(outcome["status"], "approved")
+        self.assertEqual(outcome["category"], CATEGORY_GENERAL)
+        self.assertIn(ROOM_CODE_GENERAL, outcome["community_url"])
+
+    def test_skin_case_routes_to_skin_group(self):
+        diagnosis = {
+            "urgency": "High",
+            "conditions": [{"name": "Fungal Skin Infection", "likelihood": "High"}],
+        }
+        intake = {"symptom": "skin rash and itching", "age": 28}
+
+        outcome = evaluate_chat_access_eligibility(user=self.user, intake=intake, diagnosis=diagnosis)
+        self.assertEqual(outcome["status"], "approved")
+        self.assertEqual(outcome["category"], CATEGORY_SKIN)
+        self.assertIn(ROOM_CODE_SKIN, outcome["community_url"])
+
+    def test_senior_case_routes_to_senior_group(self):
+        diagnosis = {
+            "urgency": "High",
+            "conditions": [{"name": "General frailty", "likelihood": "High"}],
+        }
+        intake = {"symptom": "fatigue while walking", "age": 68}
+
+        outcome = evaluate_chat_access_eligibility(user=self.user, intake=intake, diagnosis=diagnosis)
+        self.assertEqual(outcome["status"], "approved")
+        self.assertEqual(outcome["category"], CATEGORY_SENIOR)
+        self.assertIn(ROOM_CODE_SENIOR, outcome["community_url"])
 
     def test_request_access_when_already_approved(self):
         tag = CommunityAccessTag.objects.create(
             user=self.user,
-            tag_code="GROUP_SEVERE",
-            category=CHAT_CATEGORY,
+            tag_code="MIND_SEVERE",
+            category=CATEGORY_MIND,
             risk_level="SERIOUS",
             confidence_score=0.82,
             recurrence_count=2,
@@ -68,15 +106,15 @@ class CommunityAccessFlowTests(TestCase):
         self.assertEqual(tag.status, CommunityAccessTag.Status.APPROVED)
 
     def test_room_access_requires_approved_chat_tag(self):
-        support_room = CommunityRoom.objects.get(code="community-support-chat")
+        support_room = CommunityRoom.objects.get(code=ROOM_CODE_MIND)
         blocked = self.client.get(reverse("community_room", kwargs={"room_code": support_room.code}))
         self.assertEqual(blocked.status_code, 302)
         self.assertEqual(blocked.url, reverse("community"))
 
         CommunityAccessTag.objects.create(
             user=self.user,
-            tag_code="GROUP_CHRONIC",
-            category=CHAT_CATEGORY,
+            tag_code="MIND_CHRONIC",
+            category=CATEGORY_MIND,
             risk_level="SERIOUS",
             confidence_score=0.88,
             recurrence_count=4,
@@ -96,8 +134,8 @@ class CommunityAccessFlowTests(TestCase):
         )
         CommunityAccessTag.objects.create(
             user=self.user,
-            tag_code="GROUP_CHRONIC",
-            category=CHAT_CATEGORY,
+            tag_code="MIND_CHRONIC",
+            category=CATEGORY_MIND,
             risk_level="SERIOUS",
             confidence_score=0.88,
             recurrence_count=4,
@@ -108,11 +146,11 @@ class CommunityAccessFlowTests(TestCase):
         self.assertEqual(blocked.url, reverse("community"))
 
     def test_unsafe_message_is_blocked(self):
-        room = CommunityRoom.objects.get(code="community-support-chat")
+        room = CommunityRoom.objects.get(code=ROOM_CODE_MIND)
         CommunityAccessTag.objects.create(
             user=self.user,
-            tag_code="GROUP_SEVERE",
-            category=CHAT_CATEGORY,
+            tag_code="MIND_SEVERE",
+            category=CATEGORY_MIND,
             risk_level="SERIOUS",
             confidence_score=0.8,
             recurrence_count=2,
@@ -134,8 +172,8 @@ class CommunityAccessFlowTests(TestCase):
     def test_unlocked_banner_is_shown_once(self):
         CommunityAccessTag.objects.create(
             user=self.user,
-            tag_code="GROUP_SEVERE",
-            category=CHAT_CATEGORY,
+            tag_code="MIND_SEVERE",
+            category=CATEGORY_MIND,
             risk_level="SERIOUS",
             confidence_score=0.85,
             recurrence_count=2,

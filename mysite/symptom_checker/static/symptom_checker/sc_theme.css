@@ -51,6 +51,10 @@ body.sc-page {
     overflow: hidden;
 }
 
+.sc-card-main-suggest {
+    overflow: visible;
+}
+
 .sc-head {
     padding: clamp(18px, 3vw, 30px);
     border-bottom: 1px solid #e3edf8;
@@ -382,6 +386,11 @@ body.sc-page {
     box-shadow: 0 12px 24px rgba(16, 42, 67, 0.12);
     max-height: 220px;
     overflow-y: auto;
+}
+
+.sc-suggest-menu.sc-up {
+    top: auto;
+    bottom: calc(100% + 4px);
 }
 
 .sc-suggest-item {

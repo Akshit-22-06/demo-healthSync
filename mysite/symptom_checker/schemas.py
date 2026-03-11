@@ -5,7 +5,7 @@ from typing import Any
 import re
 
 
-def _safe_int(value: object, default: int = 0) -> int:
+def parse_int_safely(value: object, default: int = 0) -> int:
     try:
         return int(value)
     except Exception:
@@ -19,7 +19,7 @@ def _safe_int(value: object, default: int = 0) -> int:
 
 
 @dataclass
-class IntakeData:
+class PatientIntake:
     age: int | None
     gender: str
     state: str
@@ -29,7 +29,7 @@ class IntakeData:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "IntakeData":
+    def from_dict(cls, data: dict[str, Any]) -> "PatientIntake":
         return cls(
             age=data.get("age"),
             gender=data.get("gender", ""),
@@ -39,7 +39,7 @@ class IntakeData:
 
 
 @dataclass
-class QuestionItem:
+class FollowUpQuestion:
     id: int
     text: str
     type: str = "yesno"
@@ -49,9 +49,9 @@ class QuestionItem:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "QuestionItem":
+    def from_dict(cls, data: dict[str, Any]) -> "FollowUpQuestion":
         return cls(
-            id=_safe_int(data.get("id", 0)),
+            id=parse_int_safely(data.get("id", 0)),
             text=data.get("text", ""),
             type=data.get("type", "yesno"),
             options=list(data.get("options", [])),
@@ -59,7 +59,7 @@ class QuestionItem:
 
 
 @dataclass
-class AnswerItem:
+class GivenAnswer:
     question_id: int
     question_text: str
     answer: str
@@ -68,16 +68,16 @@ class AnswerItem:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "AnswerItem":
+    def from_dict(cls, data: dict[str, Any]) -> "GivenAnswer":
         return cls(
-            question_id=_safe_int(data.get("question_id", 0)),
+            question_id=parse_int_safely(data.get("question_id", 0)),
             question_text=data.get("question_text", ""),
             answer=data.get("answer", ""),
         )
 
 
 @dataclass
-class DiagnosisCondition:
+class PossibleCondition:
     name: str
     likelihood: str = ""
     reasoning: str = ""
@@ -87,7 +87,7 @@ class DiagnosisCondition:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "DiagnosisCondition":
+    def from_dict(cls, data: dict[str, Any]) -> "PossibleCondition":
         return cls(
             name=data.get("name", ""),
             likelihood=data.get("likelihood", ""),
@@ -97,8 +97,8 @@ class DiagnosisCondition:
 
 
 @dataclass
-class DiagnosisResult:
-    conditions: list[DiagnosisCondition]
+class TriageAssessment:
+    conditions: list[PossibleCondition]
     urgency: str
     advice: str
 
@@ -110,10 +110,10 @@ class DiagnosisResult:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "DiagnosisResult":
+    def from_dict(cls, data: dict[str, Any]) -> "TriageAssessment":
         rows = data.get("conditions", []) or []
         return cls(
-            conditions=[DiagnosisCondition.from_dict(row) for row in rows],
+            conditions=[PossibleCondition.from_dict(row) for row in rows],
             urgency=data.get("urgency", "Moderate"),
             advice=data.get("advice", "Consult a qualified clinic or hospital for evaluation."),
         )

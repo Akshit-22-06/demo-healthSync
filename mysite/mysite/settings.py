@@ -132,10 +132,11 @@ except ModuleNotFoundError:
 
 if load_dotenv:
     # Load .env from both project root and manage.py directory.
-    load_dotenv(BASE_DIR / ".env")
-    load_dotenv(BASE_DIR.parent / ".env")
+    load_dotenv(BASE_DIR / ".env", override=True)
+    load_dotenv(BASE_DIR.parent / ".env", override=True)
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_SC_KEY = os.getenv("GEMINI_SC_KEY", "")
 CARE_DISCOVERY_PROVIDER = os.getenv("CARE_DISCOVERY_PROVIDER", "osm")
 HERE_API_KEY = os.getenv("HERE_API_KEY", "")
 TOMTOM_API_KEY = os.getenv("TOMTOM_API_KEY", "")

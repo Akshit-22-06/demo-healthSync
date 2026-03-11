@@ -4,8 +4,8 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase
 
 from articles.models import Article
-from symptom_checker.ai_client import AIGenerationError
-from symptom_checker.schemas import DiagnosisCondition, DiagnosisResult, QuestionItem
+from symptom_checker.ai_client import AIGenerationError, generate_symptom_suggestions
+from symptom_checker.schemas import PossibleCondition, TriageAssessment, FollowUpQuestion
 
 
 class SymptomCheckerFlowTests(TestCase):
@@ -28,8 +28,8 @@ class SymptomCheckerFlowTests(TestCase):
     @patch("symptom_checker.engine.generate_questions")
     def test_start_creates_session_and_uses_live_question_set(self, mock_generate_questions):
         mock_generate_questions.return_value = [
-            QuestionItem(id=1, text="When did symptoms start?", type="text", options=[]),
-            QuestionItem(id=2, text="Any fever?", type="yesno", options=[]),
+            FollowUpQuestion(id=1, text="When did symptoms start?", type="text", options=[]),
+            FollowUpQuestion(id=2, text="Any fever?", type="yesno", options=[]),
         ]
 
         response = self.client.post(
@@ -81,12 +81,12 @@ class SymptomCheckerFlowTests(TestCase):
         mock_discover_centers,
     ):
         mock_generate_questions.return_value = [
-            QuestionItem(id=1, text="Any fever?", type="yesno", options=[]),
-            QuestionItem(id=2, text="Any pain?", type="yesno", options=[]),
+            FollowUpQuestion(id=1, text="Any fever?", type="yesno", options=[]),
+            FollowUpQuestion(id=2, text="Any pain?", type="yesno", options=[]),
         ]
-        mock_generate_diagnosis.return_value = DiagnosisResult(
+        mock_generate_diagnosis.return_value = TriageAssessment(
             conditions=[
-                DiagnosisCondition(
+                PossibleCondition(
                     name="Fungal Skin Infection",
                     likelihood="High",
                     reasoning="Persistent itchy rash pattern supports fungal etiology.",
@@ -143,7 +143,7 @@ class SymptomCheckerFlowTests(TestCase):
     @patch("symptom_checker.engine.generate_questions")
     def test_result_redirects_to_sc_when_ai_diagnosis_fails(self, mock_generate_questions, mock_generate_diagnosis):
         mock_generate_questions.return_value = [
-            QuestionItem(id=1, text="Any fever?", type="yesno", options=[]),
+            FollowUpQuestion(id=1, text="Any fever?", type="yesno", options=[]),
         ]
         mock_generate_diagnosis.side_effect = AIGenerationError("quota exceeded")
 
@@ -177,6 +177,15 @@ class SymptomCheckerFlowTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertJSONEqual(response.content, {"items": ["Down syndrome"]})
 
+    @patch("symptom_checker.views.generate_symptom_suggestions")
+    def test_symptom_suggest_endpoint_uses_fallback_when_generator_fails(self, mock_generate_symptom_suggestions):
+        mock_generate_symptom_suggestions.side_effect = RuntimeError("upstream failure")
+        response = self.client.get("/symptoms/symptom-suggest/?q=down")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("items", payload)
+        self.assertIn("Down syndrome", payload["items"])
+
     @patch("symptom_checker.engine.discover_nearby_care_centers")
     @patch("symptom_checker.engine.generate_diagnosis")
     @patch("symptom_checker.engine.generate_questions")
@@ -187,11 +196,11 @@ class SymptomCheckerFlowTests(TestCase):
         mock_discover_centers,
     ):
         mock_generate_questions.return_value = [
-            QuestionItem(id=1, text="Any fever?", type="yesno", options=[]),
+            FollowUpQuestion(id=1, text="Any fever?", type="yesno", options=[]),
         ]
-        mock_generate_diagnosis.return_value = DiagnosisResult(
+        mock_generate_diagnosis.return_value = TriageAssessment(
             conditions=[
-                DiagnosisCondition(
+                PossibleCondition(
                     name="General check",
                     likelihood="Moderate",
                     reasoning="Basic screening outcome.",
@@ -234,7 +243,7 @@ class SymptomCheckerFlowTests(TestCase):
     @patch("symptom_checker.engine.generate_questions")
     def test_logged_in_user_is_not_limited_by_guest_usage_flag(self, mock_generate_questions):
         mock_generate_questions.return_value = [
-            QuestionItem(id=1, text="Any fever?", type="yesno", options=[]),
+            FollowUpQuestion(id=1, text="Any fever?", type="yesno", options=[]),
         ]
         self.client.login(username="writer1", password="test-pass-123")
         session = self.client.session
@@ -253,3 +262,18 @@ class SymptomCheckerFlowTests(TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Any fever?")
+
+    @patch("symptom_checker.ai_client._generate_content_with_retry")
+    def test_generate_symptom_suggestions_falls_back_when_ai_unavailable(self, mock_generate):
+        mock_generate.side_effect = RuntimeError("quota")
+        items = generate_symptom_suggestions("down", max_items=10)
+        self.assertIn("Down syndrome", items)
+        self.assertGreater(len(items), 0)
+
+    @patch("symptom_checker.ai_client._generate_content_with_retry")
+    def test_generate_symptom_suggestions_falls_back_when_ai_payload_invalid(self, mock_generate):
+        mock_generate.return_value = '{"invalid":"payload"}'
+        items = generate_symptom_suggestions("fev", max_items=10)
+        self.assertIn("Fever", items)
+        self.assertGreater(len(items), 0)
+

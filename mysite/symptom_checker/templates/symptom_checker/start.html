@@ -12,7 +12,7 @@
 </head>
 <body class="sc-page">
     <main class="sc-shell">
-        <section class="sc-card sc-card-main">
+        <section class="sc-card sc-card-main sc-card-main-suggest">
             <header class="sc-head">
                 <span class="sc-eyebrow">HealthSync Smart Triage</span>
                 <h1 class="sc-title">Symptom Checker</h1>
@@ -97,48 +97,81 @@
     </main>
     <script>
     (function () {
-        function wireSuggest(inputId, menuId, endpoint) {
+        function wireSuggest(inputId, menuId, endpoint, minChars, debounceMs) {
             const input = document.getElementById(inputId);
             const menu = document.getElementById(menuId);
             if (!input || !menu) return;
+            const minQueryLength = Number(minChars || 2);
+            const delayMs = Number(debounceMs || 140);
 
             let timer = null;
+            let requestToken = 0;
             const hideMenu = function () {
                 menu.innerHTML = "";
                 menu.hidden = true;
+                menu.classList.remove("sc-up");
             };
 
             const showItems = function (items) {
-                if (!Array.isArray(items) || !items.length) {
+                const normalized = Array.isArray(items)
+                    ? items.map((item) => String(item || "").trim()).filter(Boolean)
+                    : [];
+                if (!normalized.length) {
                     hideMenu();
                     return;
                 }
-                menu.innerHTML = items.map((item) => (
-                    `<button type="button" class="sc-suggest-item" data-value="${String(item).replace(/"/g, "&quot;")}">${item}</button>`
-                )).join("");
+
+                menu.innerHTML = "";
+                normalized.forEach((item) => {
+                    const btn = document.createElement("button");
+                    btn.type = "button";
+                    btn.className = "sc-suggest-item";
+                    btn.setAttribute("data-value", item);
+                    btn.textContent = item;
+                    menu.appendChild(btn);
+                });
+
+                const rect = input.getBoundingClientRect();
+                const freeBelow = window.innerHeight - rect.bottom;
+                const freeAbove = rect.top;
+                if (freeBelow < 180 && freeAbove > freeBelow) {
+                    menu.classList.add("sc-up");
+                } else {
+                    menu.classList.remove("sc-up");
+                }
                 menu.hidden = false;
             };
 
             input.addEventListener("input", function () {
                 const q = input.value.trim();
+                requestToken += 1;
+                const activeToken = requestToken;
                 if (timer) clearTimeout(timer);
-                if (q.length < 2) {
+                if (q.length < minQueryLength) {
                     hideMenu();
                     return;
                 }
                 timer = setTimeout(async function () {
                     try {
                         const res = await fetch(endpoint + encodeURIComponent(q));
+                        if (activeToken !== requestToken) return;
                         if (!res.ok) {
                             hideMenu();
                             return;
                         }
                         const data = await res.json();
+                        if (activeToken !== requestToken) return;
                         showItems(data.items || []);
                     } catch (_) {
                         hideMenu();
                     }
-                }, 140);
+                }, delayMs);
+            });
+
+            input.addEventListener("focus", function () {
+                if ((input.value || "").trim().length >= minQueryLength) {
+                    input.dispatchEvent(new Event("input"));
+                }
             });
 
             menu.addEventListener("click", function (event) {
@@ -155,8 +188,8 @@
             });
         }
 
-        wireSuggest("state", "state-suggest-menu", "/symptoms/location-suggest/?q=");
-        wireSuggest("symptom", "symptom-suggest-menu", "/symptoms/symptom-suggest/?q=");
+        wireSuggest("state", "state-suggest-menu", "/symptoms/location-suggest/?q=", 2, 140);
+        wireSuggest("symptom", "symptom-suggest-menu", "/symptoms/symptom-suggest/?q=", 3, 320);
     })();
     </script>
 </body>

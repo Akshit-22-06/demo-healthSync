@@ -214,9 +214,21 @@
 
 <script>
 (function () {
+    function readCookie(name) {
+        const cookie = document.cookie || "";
+        const parts = cookie.split(";").map((row) => row.trim());
+        for (const part of parts) {
+            if (part.startsWith(name + "=")) {
+                return decodeURIComponent(part.slice(name.length + 1));
+            }
+        }
+        return "";
+    }
+
     const input = document.getElementById("message-input");
     const count = document.getElementById("char-count");
     const scrollBox = document.getElementById("chat-scroll");
+    const form = document.querySelector("form.msg-form");
     if (scrollBox) {
         scrollBox.scrollTop = scrollBox.scrollHeight;
     }
@@ -240,6 +252,17 @@
             }
         });
     });
+
+    if (form) {
+        form.addEventListener("submit", function () {
+            const tokenInput = form.querySelector('input[name="csrfmiddlewaretoken"]');
+            const cookieToken = readCookie("csrftoken");
+            if (tokenInput && cookieToken) {
+                // Keep POST token aligned with latest cookie token (helps after re-login in another tab).
+                tokenInput.value = cookieToken;
+            }
+        });
+    }
 })();
 </script>
 {% endblock %}

@@ -4,24 +4,31 @@ import json
 import os
 import re
 import time
+from difflib import SequenceMatcher
 from urllib import error as urlerror
 from urllib import request as urlrequest
 
 from django.conf import settings
 
 from symptom_checker.schemas import (
-    AnswerItem,
-    DiagnosisResult,
-    IntakeData,
-    QuestionItem,
+    FollowUpQuestion,
+    GivenAnswer,
+    PatientIntake,
+    TriageAssessment,
+)
+from symptom_checker.text_assets import (
+    FALLBACK_SYMPTOM_TERMS,
+    MAX_AUTO_RETRY_WAIT_SECONDS,
+    build_diagnosis_generation_prompt,
+    build_question_generation_prompt,
+    build_symptom_suggestion_prompt,
 )
 
 
 class AIGenerationError(RuntimeError):
     pass
 
-
-def _read_config(name: str, default: str = "") -> str:
+def _read_setting(name: str, default: str = "") -> str:
     candidates = [os.getenv(name), getattr(settings, name, None), default]
     for raw in candidates:
         value = str(raw or "").strip()
@@ -34,12 +41,12 @@ def _read_config(name: str, default: str = "") -> str:
     return ""
 
 
-def _parse_json(text: str):
+def _parse_json_response(text: str):
     cleaned = (text or "").replace("```json", "").replace("```", "").strip()
     return json.loads(cleaned)
 
 
-def _retry_delay_seconds(message: str) -> float:
+def _extract_retry_seconds(message: str) -> float:
     text = str(message or "")
     patterns = [
         r"retrydelay['\"=: ]+(\d+)\s*s",
@@ -58,26 +65,33 @@ def _retry_delay_seconds(message: str) -> float:
 
 
 def _generate_content_with_retry(prompt: str, *, retries: int = 2):
-    api_key = _read_config("GEMINI_API_KEY")
-    model = _read_config("GEMINI_MODEL", "gemini-2.5-flash")
+    api_key = _read_setting("GEMINI_SC_KEY")
+    model = _read_setting("GEMINI_MODEL", "gemini-2.5-flash")
     if not api_key:
         raise AIGenerationError(
-            "Gemini API key missing. Set GEMINI_API_KEY in .env and restart server."
+            "Gemini API key missing. Set GEMINI_SC_KEY in .env and restart server."
         )
 
     last_error = None
     for attempt in range(retries + 1):
         try:
-            return _call_gemini(prompt=prompt, api_key=api_key, model=model)
+            return _call_gemini_api(prompt=prompt, api_key=api_key, model=model)
         except Exception as exc:
             last_error = exc
             if attempt < retries:
-                delay = max(0.8 * (attempt + 1), _retry_delay_seconds(str(exc)))
-                time.sleep(min(delay, 20.0))
-    raise AIGenerationError(_friendly_error(last_error))
+                server_retry_delay = _extract_retry_seconds(str(exc))
+                # If server asks for a long retry window, avoid hammering the API.
+                if server_retry_delay > MAX_AUTO_RETRY_WAIT_SECONDS:
+                    break
+                if server_retry_delay > 0:
+                    delay = server_retry_delay
+                else:
+                    delay = 0.8 * (attempt + 1)
+                time.sleep(min(delay, MAX_AUTO_RETRY_WAIT_SECONDS))
+    raise AIGenerationError(_build_user_friendly_error(last_error))
 
 
-def _call_gemini(*, prompt: str, api_key: str, model: str) -> str:
+def _call_gemini_api(*, prompt: str, api_key: str, model: str) -> str:
     body = {
         "contents": [
             {
@@ -127,7 +141,7 @@ def _call_gemini(*, prompt: str, api_key: str, model: str) -> str:
     return content
 
 
-def _friendly_error(exc: Exception | None) -> str:
+def _build_user_friendly_error(exc: Exception | None) -> str:
     message = str(exc or "")
     lowered = message.lower()
     if "not found for api version" in lowered or "is not found" in lowered or "404" in lowered:
@@ -138,27 +152,87 @@ def _friendly_error(exc: Exception | None) -> str:
     if "reported as leaked" in lowered or "api key was reported as leaked" in lowered:
         return (
             "Gemini rejected this key because it was reported as leaked. "
-            "Generate a new Gemini API key and replace GEMINI_API_KEY."
+            "Generate a new Gemini API key and replace GEMINI_SC_KEY."
         )
     if "quota" in lowered or "429" in lowered or "rate limit" in lowered:
         retry_match = re.search(r"retry[^0-9]*(\d+)", message)
         retry_hint = f" Retry in about {retry_match.group(1)} seconds." if retry_match else ""
+        zero_quota_hints = (
+            "limit '0'",
+            "limit: 0",
+            '"limit":"0"',
+            '"limit": "0"',
+            "quota value is 0",
+            "quota_limit_value",
+        )
+        if any(hint in lowered for hint in zero_quota_hints):
+            return (
+                "Gemini quota is configured as 0 for this project/model (429). "
+                "Changing API keys in the same project will not help. "
+                "Enable billing or use a project/model with available quota."
+                + retry_hint
+            )
         return "Gemini rate/quota limit reached (429). Retry shortly." + retry_hint
     if "invalid api key" in lowered or "incorrect api key" in lowered or "401" in lowered:
-        return "Gemini API key is invalid or unauthorized (401). Update GEMINI_API_KEY and restart server."
+        return "Gemini API key is invalid or unauthorized (401). Update GEMINI_SC_KEY and restart server."
     if "permission" in lowered or "forbidden" in lowered or "403" in lowered:
         return "Gemini request forbidden (403). Check key permissions, API enablement, and model access."
-    return "Gemini request failed. Check GEMINI_API_KEY, model name, and quota."
+    return "Gemini request failed. Check GEMINI_SC_KEY, model name, and quota."
 
 
-def _validate_question(row: dict, idx: int) -> QuestionItem:
+def _normalize_search_text(value: str) -> str:
+    return re.sub(r"[^a-z0-9 ]+", " ", (value or "").lower()).strip()
+
+
+def fallback_symptom_suggestions(query: str, *, max_items: int = 10) -> list[str]:
+    cleaned = (query or "").strip()
+    if len(cleaned) < 2:
+        return []
+
+    max_items = max(3, min(int(max_items or 10), 20))
+    q = _normalize_search_text(cleaned)
+    starts: list[tuple[float, str]] = []
+    contains: list[tuple[float, str]] = []
+    fuzzy: list[tuple[float, str]] = []
+
+    for item in FALLBACK_SYMPTOM_TERMS:
+        key = _normalize_search_text(item)
+        if not key:
+            continue
+        if key.startswith(q):
+            starts.append((1.0, item))
+            continue
+        if q in key:
+            contains.append((0.9, item))
+            continue
+        ratio = SequenceMatcher(a=q, b=key).ratio()
+        if ratio >= 0.45:
+            fuzzy.append((ratio, item))
+
+    fuzzy.sort(key=lambda row: row[0], reverse=True)
+    ordered = starts + contains + fuzzy
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for _, item in ordered:
+        key = item.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+        if len(out) >= max_items:
+            break
+    return out
+
+
+def _build_question_from_ai_row(row: dict, idx: int) -> FollowUpQuestion:
     text = str(row.get("text") or "").strip()
     q_type = str(row.get("type") or "yesno").strip().lower()
     options = row.get("options") or []
     if not isinstance(options, list):
         options = []
 
-    item = QuestionItem(
+    item = FollowUpQuestion(
         id=idx,
         text=text,
         type=q_type,
@@ -175,45 +249,11 @@ def _validate_question(row: dict, idx: int) -> QuestionItem:
         item.options = []
     return item
 
-def generate_questions(intake: IntakeData) -> list[QuestionItem]:
-    prompt = f"""
-You are a medical triage intake engine for first-pass risk stratification, not final diagnosis.
-Generate exactly 15 medically relevant follow-up questions for this profile.
-
-Output rules:
-1) Return ONLY a JSON array with exactly 15 objects.
-2) Each object must contain keys: id, text, type, options, ai_generated.
-3) ai_generated must be true.
-4) type must be one of: yesno, text, single_choice.
-5) For yesno/text, options must be [].
-6) For single_choice, options must have 2 to 4 concise choices.
-7) No duplicate questions, no greetings, no explanations.
-
-Clinical coverage across the 15 questions must include:
-- Onset and duration
-- Progression and severity
-- Red flags (bleeding, breathing difficulty, altered sensorium, severe pain)
-- Associated symptoms
-- Exposure/travel/contact risks
-- Relevant comorbidity and medication context
-- Prior episodes and functional impact
-
-Question style:
-- One clinical concept per question
-- Max 16 words per question
-- Neutral, non-judgmental language
-- Do not assume a confirmed diagnosis
-
-User profile:
-Age: {intake.age}
-Gender: {intake.gender}
-Location: {intake.state}
-Primary symptom text: {intake.symptom}
-"""
-
+def generate_questions(intake: PatientIntake) -> list[FollowUpQuestion]:
+    prompt = build_question_generation_prompt(intake)
     response = _generate_content_with_retry(prompt, retries=3)
     try:
-        parsed = _parse_json(response)
+        parsed = _parse_json_response(response)
     except Exception as exc:
         raise AIGenerationError(f"Could not parse AI questions JSON: {exc}") from exc
 
@@ -222,14 +262,14 @@ Primary symptom text: {intake.symptom}
     if len(parsed) != 15:
         raise AIGenerationError("AI must return exactly 15 questions.")
 
-    questions: list[QuestionItem] = []
+    questions: list[FollowUpQuestion] = []
     seen: set[str] = set()
     for idx, row in enumerate(parsed, start=1):
         if not isinstance(row, dict):
             raise AIGenerationError("AI question items must be JSON objects.")
         if row.get("ai_generated") is not True:
             raise AIGenerationError("AI generation marker missing for question item.")
-        question = _validate_question(row, idx)
+        question = _build_question_from_ai_row(row, idx)
         signature = question.text.lower()
         if signature in seen:
             raise AIGenerationError("AI returned duplicate questions.")
@@ -238,49 +278,11 @@ Primary symptom text: {intake.symptom}
     return questions
 
 
-def generate_diagnosis(intake: IntakeData, answers: list[AnswerItem]) -> DiagnosisResult:
-    answer_lines = "\n".join(f"- Q: {answer.question_text} | A: {answer.answer}" for answer in answers)
-    prompt = f"""
-You are a conservative clinical triage assistant for informational risk guidance.
-Do NOT provide definitive diagnosis. Provide structured differential and urgency triage.
-
-Return ONLY a JSON object with this exact schema:
-{{
-  "conditions": [
-    {{
-      "name": "Condition name",
-      "likelihood": "High | Medium | Low",
-      "reasoning": "One concise, evidence-linked sentence",
-      "specialization": "Most relevant clinician specialty"
-    }}
-  ],
-  "urgency": "Low | Moderate | High",
-  "advice": "Actionable next-step guidance with red-flag escalation",
-  "ai_generated": true
-}}
-
-Strict clinical rules:
-1) Return 2 to 4 plausible conditions only.
-2) At least one condition must directly explain primary symptom.
-3) Use High likelihood only when multiple answers strongly support it.
-4) urgency=High only for red-flag patterns (e.g., breathing distress, active bleeding, severe neurologic signs).
-5) reasoning must reference observed symptom pattern, not guesswork.
-6) advice must be practical and safety-focused; include when to seek urgent care.
-7) No markdown, no narrative outside schema, no null values.
-
-User profile:
-Age: {intake.age}
-Gender: {intake.gender}
-Location: {intake.state}
-Primary symptom text: {intake.symptom}
-
-Follow-up answers:
-{answer_lines}
-"""
-
+def generate_diagnosis(intake: PatientIntake, answers: list[GivenAnswer]) -> TriageAssessment:
+    prompt = build_diagnosis_generation_prompt(intake, answers)
     response = _generate_content_with_retry(prompt)
     try:
-        parsed = _parse_json(response)
+        parsed = _parse_json_response(response)
     except Exception as exc:
         raise AIGenerationError(f"Could not parse AI diagnosis JSON: {exc}") from exc
 
@@ -289,7 +291,7 @@ Follow-up answers:
     if parsed.get("ai_generated") is not True:
         raise AIGenerationError("AI generation marker missing for diagnosis.")
 
-    diagnosis = DiagnosisResult.from_dict(parsed)
+    diagnosis = TriageAssessment.from_dict(parsed)
     diagnosis.conditions = [c for c in diagnosis.conditions if c.name.strip()]
     if not diagnosis.conditions:
         raise AIGenerationError("AI diagnosis returned no valid conditions.")
@@ -306,28 +308,30 @@ def generate_symptom_suggestions(query: str, *, max_items: int = 10) -> list[str
         return []
 
     max_items = max(3, min(int(max_items or 10), 20))
-    prompt = f"""
-You generate health search suggestions for an input field.
-Return ONLY a JSON array (no markdown) of up to {max_items} short terms.
-Use clinically common symptom/condition names only.
-Input text: {cleaned}
-"""
+    fallback_items = fallback_symptom_suggestions(cleaned, max_items=max_items)
+    # Preserve Gemini quota for core triage calls by using deterministic suggestions first.
+    if fallback_items:
+        return fallback_items[:max_items]
+    if len(cleaned) < 4:
+        return []
 
+    prompt = build_symptom_suggestion_prompt(cleaned, max_items)
+
+    ai_items: list[str] = []
     try:
         response = _generate_content_with_retry(prompt, retries=1)
-        parsed = _parse_json(response)
-    except Exception as exc:
-        raise AIGenerationError(str(exc)) from exc
-
-    if not isinstance(parsed, list):
-        raise AIGenerationError("AI symptom suggestion response is not a JSON array.")
+        parsed = _parse_json_response(response)
+        if isinstance(parsed, list):
+            for row in parsed:
+                item = str(row or "").strip()
+                if item and len(item) <= 64:
+                    ai_items.append(item)
+    except Exception:
+        ai_items = []
 
     out: list[str] = []
     seen: set[str] = set()
-    for row in parsed:
-        item = str(row or "").strip()
-        if not item:
-            continue
+    for item in ai_items + fallback_items:
         key = item.lower()
         if key in seen:
             continue
@@ -336,4 +340,3 @@ Input text: {cleaned}
         if len(out) >= max_items:
             break
     return out
-

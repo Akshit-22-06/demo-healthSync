@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from symptom_checker.schemas import DiagnosisResult
+from symptom_checker.schemas import TriageAssessment
 
 
-def _risk_banner(urgency: str) -> str:
+def build_risk_banner(urgency: str) -> str:
     label = (urgency or "").strip().lower()
     if label == "high":
         return "High-risk pattern detected. Seek urgent medical care now."
@@ -12,7 +12,7 @@ def _risk_banner(urgency: str) -> str:
     return "Low-risk pattern detected. Continue monitoring and seek care if symptoms worsen."
 
 
-def _next_24h_plan(urgency: str) -> list[str]:
+def build_next_24h_plan(urgency: str) -> list[str]:
     label = (urgency or "").strip().lower()
     if label == "high":
         return [
@@ -33,7 +33,7 @@ def _next_24h_plan(urgency: str) -> list[str]:
     ]
 
 
-def _health_tips() -> list[str]:
+def build_health_tips() -> list[str]:
     return [
         "Drink sufficient water or oral fluids unless a clinician advised fluid restriction.",
         "Avoid starting antibiotics, steroids, or painkillers without medical advice.",
@@ -43,10 +43,10 @@ def _health_tips() -> list[str]:
     ]
 
 
-def build_result_payload(*, diagnosis: DiagnosisResult) -> dict:
+def build_result_payload(*, diagnosis: TriageAssessment) -> dict:
     return {
         "diagnosis": diagnosis.to_dict(),
-        "risk_banner": _risk_banner(diagnosis.urgency),
-        "next_24h_plan": _next_24h_plan(diagnosis.urgency),
-        "health_tips": _health_tips(),
+        "risk_banner": build_risk_banner(diagnosis.urgency),
+        "next_24h_plan": build_next_24h_plan(diagnosis.urgency),
+        "health_tips": build_health_tips(),
     }

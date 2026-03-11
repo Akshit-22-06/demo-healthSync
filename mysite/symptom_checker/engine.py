@@ -1,18 +1,18 @@
 from __future__ import annotations
 
-from community.services import evaluate_community_eligibility
+from community.services import evaluate_chat_access_eligibility
 from symptom_checker.ai_client import AIGenerationError, generate_diagnosis, generate_questions
 from symptom_checker.diagnosis import build_result_payload
-from symptom_checker.question_flow import append_answer, current_question, next_index
-from symptom_checker.schemas import AnswerItem, DiagnosisResult, IntakeData, QuestionItem
+from symptom_checker.question_flow import add_answer, get_next_index, get_question_at_index
+from symptom_checker.schemas import FollowUpQuestion, GivenAnswer, PatientIntake, TriageAssessment
 from symptom_checker.services.care_discovery import discover_nearby_care_centers, geocode_location
 from symptom_checker.services.recommendations import recommended_articles
 
 
-SESSION_KEY = "symptom_checker_flow"
+FLOW_SESSION_KEY = "symptom_checker_flow"
 
 
-def _initial_state() -> dict:
+def create_empty_flow_state() -> dict:
     return {
         "intake": {},
         "questions": [],
@@ -26,113 +26,113 @@ def _initial_state() -> dict:
     }
 
 
-def _flow(request) -> dict:
-    return request.session.get(SESSION_KEY, _initial_state())
+def get_flow_state(request) -> dict:
+    return request.session.get(FLOW_SESSION_KEY, create_empty_flow_state())
 
 
-def _save_flow(request, flow: dict) -> None:
-    request.session[SESSION_KEY] = flow
+def save_flow_state(request, flow_state: dict) -> None:
+    request.session[FLOW_SESSION_KEY] = flow_state
     request.session.modified = True
 
 
-def start_session(request, intake: IntakeData) -> None:
-    questions = generate_questions(intake)
+def start_symptom_session(request, intake: PatientIntake) -> None:
+    generated_questions = generate_questions(intake)
 
-    flow = _initial_state()
-    flow["intake"] = intake.to_dict()
-    flow["questions"] = [question.to_dict() for question in questions]
-    flow["answers"] = []
-    flow["current_index"] = 0
-    flow["diagnosis"] = None
-    flow["diagnosis_error"] = ""
-    flow["question_error"] = ""
-    flow["community_access"] = None
-    flow["ai_calls"] = {"questions": 1, "diagnosis": 0}
-    _save_flow(request, flow)
-
-
-def has_active_session(request) -> bool:
-    flow = _flow(request)
-    return bool(flow.get("questions")) and bool(flow.get("intake"))
+    flow_state = create_empty_flow_state()
+    flow_state["intake"] = intake.to_dict()
+    flow_state["questions"] = [question.to_dict() for question in generated_questions]
+    flow_state["answers"] = []
+    flow_state["current_index"] = 0
+    flow_state["diagnosis"] = None
+    flow_state["diagnosis_error"] = ""
+    flow_state["question_error"] = ""
+    flow_state["community_access"] = None
+    flow_state["ai_calls"] = {"questions": 1, "diagnosis": 0}
+    save_flow_state(request, flow_state)
 
 
-def question_context(request) -> dict:
-    flow = _flow(request)
-    questions = [QuestionItem.from_dict(row) for row in flow.get("questions", [])]
-    idx = int(flow.get("current_index", 0))
-    question = current_question(questions, idx)
-    total = len(questions)
+def has_active_symptom_session(request) -> bool:
+    flow_state = get_flow_state(request)
+    return bool(flow_state.get("questions")) and bool(flow_state.get("intake"))
+
+
+def build_question_page_context(request) -> dict:
+    flow_state = get_flow_state(request)
+    questions = [FollowUpQuestion.from_dict(row) for row in flow_state.get("questions", [])]
+    current_index = int(flow_state.get("current_index", 0))
+    current = get_question_at_index(questions, current_index)
+    total_questions = len(questions)
     return {
-        "has_session": has_active_session(request),
-        "completed": question is None,
-        "question": question,
-        "step": idx + 1,
-        "total": total,
-        "progress": int(((idx + 1) / total) * 100) if total else 0,
+        "has_session": has_active_symptom_session(request),
+        "completed": current is None,
+        "question": current,
+        "step": current_index + 1,
+        "total": total_questions,
+        "progress": int(((current_index + 1) / total_questions) * 100) if total_questions else 0,
         "questions_source": "ai",
-        "question_error": flow.get("question_error", ""),
+        "question_error": flow_state.get("question_error", ""),
     }
 
 
-def submit_answer(request, answer_value: str) -> bool:
-    flow = _flow(request)
-    questions = [QuestionItem.from_dict(row) for row in flow.get("questions", [])]
-    answers = [AnswerItem.from_dict(row) for row in flow.get("answers", [])]
-    idx = int(flow.get("current_index", 0))
-    question = current_question(questions, idx)
-    if question is None:
+def submit_current_answer(request, answer_value: str) -> bool:
+    flow_state = get_flow_state(request)
+    questions = [FollowUpQuestion.from_dict(row) for row in flow_state.get("questions", [])]
+    answers = [GivenAnswer.from_dict(row) for row in flow_state.get("answers", [])]
+    current_index = int(flow_state.get("current_index", 0))
+    current = get_question_at_index(questions, current_index)
+    if current is None:
         return True
 
-    updated_answers = append_answer(answers, question, answer_value)
-    flow["answers"] = [answer.to_dict() for answer in updated_answers]
-    flow["current_index"] = next_index(idx)
-    _save_flow(request, flow)
-    return flow["current_index"] >= len(questions)
+    updated_answers = add_answer(answers, current, answer_value)
+    flow_state["answers"] = [answer.to_dict() for answer in updated_answers]
+    flow_state["current_index"] = get_next_index(current_index)
+    save_flow_state(request, flow_state)
+    return flow_state["current_index"] >= len(questions)
 
 
-def _top_conditions_from_diagnosis(condition_names: list[str]) -> list[str]:
+def pick_top_condition_names(condition_names: list[str]) -> list[str]:
     return [name.strip() for name in condition_names if name and name.strip()][:3]
 
 
-def _nearby_centers_for_location(intake: IntakeData) -> list[dict]:
+def find_nearby_care_centers_for_intake(intake: PatientIntake) -> list[dict]:
     location = (intake.state or "India").strip() or "India"
     return discover_nearby_care_centers(location=location, specialty="", limit=30, radius_m=5000)
 
 
-def get_or_build_result(request) -> dict:
-    flow = _flow(request)
-    if not has_active_session(request):
+def get_or_create_result_payload(request) -> dict:
+    flow_state = get_flow_state(request)
+    if not has_active_symptom_session(request):
         return {}
-    if int(flow.get("ai_calls", {}).get("questions", 0)) <= 0:
-        raise AIGenerationError(flow.get("question_error") or "AI question generation did not complete.")
+    if int(flow_state.get("ai_calls", {}).get("questions", 0)) <= 0:
+        message = flow_state.get("question_error") or "AI question generation did not complete."
+        raise AIGenerationError(message)
 
-    if flow.get("diagnosis"):
-        diagnosis_payload = flow["diagnosis"]
-        diagnosis_error = flow.get("diagnosis_error", "")
+    if flow_state.get("diagnosis"):
+        diagnosis_payload = flow_state["diagnosis"]
+        diagnosis_error = flow_state.get("diagnosis_error", "")
     else:
-        intake = IntakeData.from_dict(flow["intake"])
-        answers = [AnswerItem.from_dict(row) for row in flow.get("answers", [])]
+        intake = PatientIntake.from_dict(flow_state["intake"])
+        answers = [GivenAnswer.from_dict(row) for row in flow_state.get("answers", [])]
         try:
             diagnosis = generate_diagnosis(intake, answers)
             diagnosis_payload = diagnosis.to_dict()
             diagnosis_error = ""
-            flow["diagnosis"] = diagnosis_payload
-            flow["ai_calls"]["diagnosis"] = 1
+            flow_state["diagnosis"] = diagnosis_payload
+            flow_state["ai_calls"]["diagnosis"] = 1
         except AIGenerationError as exc:
-            flow["diagnosis_error"] = str(exc)
-            _save_flow(request, flow)
+            flow_state["diagnosis_error"] = str(exc)
+            save_flow_state(request, flow_state)
             raise
-        _save_flow(request, flow)
+        save_flow_state(request, flow_state)
 
-    built = build_result_payload(diagnosis=DiagnosisResult.from_dict(diagnosis_payload))
+    built = build_result_payload(diagnosis=TriageAssessment.from_dict(diagnosis_payload))
 
     condition_rows = diagnosis_payload.get("conditions", []) or []
-    top_condition_names = _top_conditions_from_diagnosis(
-        [row.get("name", "") for row in condition_rows if isinstance(row, dict)]
-    )
-    intake = IntakeData.from_dict(flow.get("intake", {}))
+    condition_names = [row.get("name", "") for row in condition_rows if isinstance(row, dict)]
+    top_condition_names = pick_top_condition_names(condition_names)
+    intake = PatientIntake.from_dict(flow_state.get("intake", {}))
 
-    centers = _nearby_centers_for_location(intake)
+    centers = find_nearby_care_centers_for_intake(intake)
     center_point = geocode_location((intake.state or "").strip())
 
     built["recommended_centers"] = centers
@@ -147,27 +147,27 @@ def get_or_build_result(request) -> dict:
         else {}
     )
     built["recommended_articles"] = recommended_articles(top_condition_names)
-    built["ai_calls"] = flow.get("ai_calls", {"questions": 1, "diagnosis": 1})
+    built["ai_calls"] = flow_state.get("ai_calls", {"questions": 1, "diagnosis": 1})
     built["ai_error"] = diagnosis_error
     built["ai_generation"] = {
-        "questions_ai": int(flow.get("ai_calls", {}).get("questions", 0)) > 0,
-        "diagnosis_ai": int(flow.get("ai_calls", {}).get("diagnosis", 0)) > 0,
+        "questions_ai": int(flow_state.get("ai_calls", {}).get("questions", 0)) > 0,
+        "diagnosis_ai": int(flow_state.get("ai_calls", {}).get("diagnosis", 0)) > 0,
     }
 
-    if flow.get("community_access") is None:
+    if flow_state.get("community_access") is None:
         user = getattr(request, "user", None)
-        flow["community_access"] = evaluate_community_eligibility(
+        flow_state["community_access"] = evaluate_chat_access_eligibility(
             user=user,
             intake=intake.to_dict(),
             diagnosis=diagnosis_payload,
         )
-        _save_flow(request, flow)
+        save_flow_state(request, flow_state)
 
-    built["community_access"] = flow.get("community_access") or {}
+    built["community_access"] = flow_state.get("community_access") or {}
     return built
 
 
-def reset_session(request) -> None:
-    if SESSION_KEY in request.session:
-        del request.session[SESSION_KEY]
+def reset_symptom_session(request) -> None:
+    if FLOW_SESSION_KEY in request.session:
+        del request.session[FLOW_SESSION_KEY]
         request.session.modified = True
