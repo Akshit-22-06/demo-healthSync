@@ -35,5 +35,13 @@ class HealthLog(models.Model):
 
     exercise_minutes = models.IntegerField()
 
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'date'],
+                name='one_log_per_day_per_user'
+            )
+        ]
+
     def __str__(self):
         return f"{self.user.username} - {self.date}"
