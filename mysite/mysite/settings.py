@@ -40,7 +40,6 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'authentication',
     'articles',
-    'accounts',
     'community',
     'dashboard',
     'symptom_checker'
