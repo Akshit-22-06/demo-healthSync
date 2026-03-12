@@ -27,15 +27,20 @@ def calculate_score(log):
 def dashboard(request):
 
     # ---- Handle Form Submission ----
-    if request.method == "POST":
-        form = HealthLogForm(request.POST)
-        if form.is_valid():
+    if form.is_valid():
+
+        existing_log = HealthLog.objects.filter(
+            user=request.user,
+            date=datetime.today().date()
+        ).first()
+
+        if existing_log:
+            form.add_error(None, "You already submitted a health log today.")
+        else:
             log = form.save(commit=False)
             log.user = request.user
             log.save()
             return redirect("dashboard")
-    else:
-        form = HealthLogForm()
 
     # ---- Fetch Logs (Newest First) ----
     logs = list(
