@@ -5,6 +5,7 @@ from .forms import ProfileUpdateForm
 from django.contrib.auth import get_user_model
 from articles.models import Article  # adjust if model name different
 from dashboard.models import HealthLog  # adjust if different
+from dashboard.views import calculate_score
 
 @login_required(login_url="/login/")
 def profile_view(request):
@@ -16,7 +17,7 @@ def profile_view(request):
     total_logs = logs.count()
 
     if total_logs > 0:
-        avg_score = round(sum(log.health_score for log in logs) / total_logs, 2)
+        avg_score = round(sum(calculate_score(log) for log in logs) / total_logs, 2)
     else:
         avg_score = None
 
