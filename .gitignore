@@ -13,8 +13,5 @@ db.sqlite3
 media/
 staticfiles/
  
-# Environment variables
-.env
-
 # MacOS
 .DS_Store
