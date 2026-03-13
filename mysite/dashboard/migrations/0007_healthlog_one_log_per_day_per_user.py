@@ -4,6 +4,23 @@ from django.conf import settings
 from django.db import migrations, models
 
 
+def dedupe_healthlog_rows(apps, schema_editor):
+    HealthLog = apps.get_model("dashboard", "HealthLog")
+
+    # Keep the newest row (highest id) for each (user, date) pair.
+    seen_pairs: set[tuple[int, object]] = set()
+    duplicate_ids: list[int] = []
+    for row in HealthLog.objects.order_by("-id").values("id", "user_id", "date"):
+        pair = (row["user_id"], row["date"])
+        if pair in seen_pairs:
+            duplicate_ids.append(row["id"])
+        else:
+            seen_pairs.add(pair)
+
+    if duplicate_ids:
+        HealthLog.objects.filter(id__in=duplicate_ids).delete()
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -12,6 +29,7 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        migrations.RunPython(dedupe_healthlog_rows, migrations.RunPython.noop),
         migrations.AddConstraint(
             model_name='healthlog',
             constraint=models.UniqueConstraint(fields=('user', 'date'), name='one_log_per_day_per_user'),
